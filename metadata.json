@@ -1,0 +1,6 @@
+{
+  "name": "MoteTV",
+  "description": "Polished glassmorphic remote control for Android TV and Google TV with real v2 pairing",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
