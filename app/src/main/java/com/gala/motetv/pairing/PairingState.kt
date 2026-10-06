@@ -11,10 +11,15 @@ sealed class PairingState {
     data object SendingPairingRequest : PairingState()
     data object WaitingPairingRequestAck : PairingState()
     data object SendingOptions : PairingState()
-    data object WaitingOptions : PairingState()
+    data object WaitingOptionsResponse : PairingState()
     data object SendingConfiguration : PairingState()
     data object WaitingConfigurationAck : PairingState()
-    data class WaitingForUserPin(val tvName: String, val prompt: String) : PairingState()
+    data class WaitingForUserPin(
+        val tvName: String,
+        val prompt: String,
+        val errorMessage: String? = null,
+        val isSubmitting: Boolean = false
+    ) : PairingState()
     data object SendingSecret : PairingState()
     data object WaitingSecretAck : PairingState()
     data class Paired(val device: TvDevice) : PairingState()

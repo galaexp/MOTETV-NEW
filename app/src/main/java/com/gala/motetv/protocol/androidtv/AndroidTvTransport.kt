@@ -8,6 +8,7 @@ import kotlinx.coroutines.withContext
 import java.io.Closeable
 import java.io.IOException
 import java.net.InetSocketAddress
+import java.security.MessageDigest
 import java.security.cert.X509Certificate
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLSocket
@@ -62,12 +63,6 @@ class AndroidTvTransport(
             socket.startHandshake()
 
             val session = socket.session
-            TvLogger.i(
-                TvLogger.TAG_TLS,
-                "TLS Handshake Success: Protocol=${session.protocol}, CipherSuite=${session.cipherSuite}"
-            )
-
-            // Extract server certificate
             val peerCerts = try {
                 session.peerCertificates
             } catch (e: Exception) {
@@ -86,9 +81,11 @@ class AndroidTvTransport(
                 }
             }
 
+            val fingerprint = getCertFingerprint(serverCertificate)
+
             TvLogger.i(
                 TvLogger.TAG_TLS,
-                "Server Peer Certificate: Subject=${serverCertificate?.subjectDN?.name}, Serial=${serverCertificate?.serialNumber}"
+                "REMOTE TLS:\nhost=$host\nport=$port\nprotocol=${session.protocol}\ncipher=${session.cipherSuite}\npeerCertificate=${serverCertificate?.subjectDN?.name}\nfingerprint=$fingerprint"
             )
 
             sslSocket = socket
@@ -99,6 +96,17 @@ class AndroidTvTransport(
             TvLogger.e(TvLogger.TAG_TLS, "TLS connection failed to $host:$port: ${e.message}", e)
             close()
             throw e
+        }
+    }
+
+    private fun getCertFingerprint(cert: X509Certificate?): String {
+        if (cert == null) return "N/A"
+        return try {
+            val md = MessageDigest.getInstance("SHA-256")
+            val digest = md.digest(cert.encoded)
+            digest.joinToString(":") { "%02X".format(it) }
+        } catch (e: Exception) {
+            "ERROR"
         }
     }
 

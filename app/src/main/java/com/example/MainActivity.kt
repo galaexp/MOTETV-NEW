@@ -179,6 +179,8 @@ fun MainAppHost(
             PinEntryDialog(
                 tvName = state.tvName,
                 prompt = state.prompt,
+                errorMessage = state.errorMessage,
+                isSubmitting = state.isSubmitting,
                 onPinSubmit = { pin ->
                     pairingManager.submitPin(pin)
                 },
@@ -186,9 +188,6 @@ fun MainAppHost(
                     pairingManager.cancelPairing()
                 }
             )
-        }
-        is PairingState.Failed -> {
-            // Error toast / retry affordance in badge
         }
         else -> Unit
     }

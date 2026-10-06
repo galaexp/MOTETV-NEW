@@ -18,6 +18,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -32,7 +33,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -42,10 +42,11 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.DialogProperties
+import com.gala.motetv.core.logging.TvLogger
 import com.gala.motetv.ui.theme.ElectricBlueLight
 import com.gala.motetv.ui.theme.ElectricBluePrimary
 import com.gala.motetv.ui.theme.GlassBorder
-import com.gala.motetv.ui.theme.GlassBorderStrong
 import com.gala.motetv.ui.theme.GlassSurfaceElevated
 import com.gala.motetv.ui.theme.NavyCardDark
 import com.gala.motetv.ui.theme.StatusErrorRed
@@ -59,18 +60,44 @@ fun PinEntryDialog(
     tvName: String,
     prompt: String,
     errorMessage: String? = null,
+    isSubmitting: Boolean = false,
     onPinSubmit: (String) -> Unit,
     onDismiss: () -> Unit
 ) {
     var pinText by remember { mutableStateOf("") }
+    var submitted by remember { mutableStateOf(false) }
     val focusRequester = remember { FocusRequester() }
+
+    // When a new error message is supplied (e.g. STATUS_BAD_SECRET), re-enable input and clear previous PIN
+    LaunchedEffect(errorMessage) {
+        if (errorMessage != null) {
+            submitted = false
+            pinText = ""
+            focusRequester.requestFocus()
+        }
+    }
 
     LaunchedEffect(Unit) {
         focusRequester.requestFocus()
     }
 
+    val trySubmit: (String) -> Unit = { rawPin ->
+        if (!isSubmitting && !submitted && rawPin.length == 6) {
+            submitted = true
+            TvLogger.i(TvLogger.TAG_PAIR, "PIN UI: final six-character value captured, submissionStarted = true")
+            onPinSubmit(rawPin)
+        }
+    }
+
     AlertDialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = {
+            // Never dismiss automatically on focus loss or click outside
+        },
+        properties = DialogProperties(
+            dismissOnBackPress = !isSubmitting,
+            dismissOnClickOutside = false,
+            usePlatformDefaultWidth = true
+        ),
         containerColor = NavyCardDark,
         shape = RoundedCornerShape(24.dp),
         title = {
@@ -116,14 +143,18 @@ fun PinEntryDialog(
                 // Hidden field controlling focus & input
                 BasicTextField(
                     value = pinText,
-                    onValueChange = {
-                        if (it.length <= 6) {
-                            pinText = it.uppercase()
-                            if (it.length == 6) {
-                                onPinSubmit(it.uppercase())
+                    onValueChange = { newValue ->
+                        if (!isSubmitting && !submitted) {
+                            val sanitized = newValue.filter { it.isLetterOrDigit() }.take(6).uppercase()
+                            pinText = sanitized
+                            TvLogger.d(TvLogger.TAG_PAIR, "PIN UI: changed length = ${sanitized.length}")
+
+                            if (sanitized.length == 6) {
+                                trySubmit(sanitized)
                             }
                         }
                     },
+                    enabled = !isSubmitting,
                     keyboardOptions = KeyboardOptions(
                         keyboardType = KeyboardType.Ascii,
                         capitalization = KeyboardCapitalization.Characters,
@@ -131,9 +162,7 @@ fun PinEntryDialog(
                     ),
                     keyboardActions = KeyboardActions(
                         onDone = {
-                            if (pinText.isNotBlank()) {
-                                onPinSubmit(pinText)
-                            }
+                            trySubmit(pinText)
                         }
                     ),
                     modifier = Modifier
@@ -147,7 +176,7 @@ fun PinEntryDialog(
                         ) {
                             for (i in 0 until 6) {
                                 val char = pinText.getOrNull(i)?.toString() ?: ""
-                                val isFocused = pinText.length == i
+                                val isFocused = pinText.length == i && !isSubmitting
 
                                 Box(
                                     modifier = Modifier
@@ -181,8 +210,25 @@ fun PinEntryDialog(
                     }
                 )
 
-                if (errorMessage != null) {
-                    Spacer(modifier = Modifier.height(12.dp))
+                if (isSubmitting) {
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            color = ElectricBluePrimary,
+                            strokeWidth = 2.dp
+                        )
+                        Text(
+                            text = "Verifying pairing code...",
+                            style = Typography.bodySmall,
+                            color = ElectricBlueLight
+                        )
+                    }
+                } else if (errorMessage != null) {
+                    Spacer(modifier = Modifier.height(14.dp))
                     Text(
                         text = errorMessage,
                         style = Typography.bodyMedium,
@@ -194,12 +240,11 @@ fun PinEntryDialog(
         },
         confirmButton = {
             GlassButton(
-                text = "Pair TV",
+                text = if (isSubmitting) "Verifying..." else "Pair TV",
                 isPrimary = true,
+                enabled = pinText.length == 6 && !isSubmitting && !submitted,
                 onClick = {
-                    if (pinText.isNotBlank()) {
-                        onPinSubmit(pinText)
-                    }
+                    trySubmit(pinText)
                 },
                 testTag = "btn_submit_pin"
             )
@@ -207,6 +252,7 @@ fun PinEntryDialog(
         dismissButton = {
             TextButton(
                 onClick = onDismiss,
+                enabled = !isSubmitting,
                 modifier = Modifier.testTag("btn_cancel_pin")
             ) {
                 Text("Cancel", color = TextMuted)

@@ -72,10 +72,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.gala.motetv.core.model.AndroidTvKeyCodes
 import com.gala.motetv.core.model.ConnectionState
 import com.gala.motetv.core.model.TvDevice
-import com.gala.motetv.protocol.androidtv.model.AndroidTvKeyCodes
-import com.gala.motetv.protocol.androidtv.model.KeyDirection
 import com.gala.motetv.ui.components.ConnectionStatusBadge
 import com.gala.motetv.ui.components.DiagnosticsBottomSheet
 import com.gala.motetv.ui.components.GlassCard
@@ -91,12 +90,13 @@ import com.gala.motetv.ui.theme.StatusErrorRed
 import com.gala.motetv.ui.theme.TextPrimary
 import com.gala.motetv.ui.theme.TextSecondary
 import com.gala.motetv.ui.theme.Typography
+import com.google.android.apps.tv.remote.protocol.Direction
 
 @Composable
 fun RemoteControlScreen(
     device: TvDevice?,
     connectionState: ConnectionState,
-    onSendKey: (Int, KeyDirection) -> Unit,
+    onSendKey: (Int, Direction) -> Unit,
     onSendImeText: (String) -> Unit,
     onOpenDevices: () -> Unit,
     onReconnect: () -> Unit,
@@ -198,7 +198,7 @@ fun RemoteControlScreen(
                     IconButton(
                         onClick = {
                             performHaptic()
-                            onSendKey(AndroidTvKeyCodes.KEYCODE_POWER, KeyDirection.SHORT)
+                            onSendKey(AndroidTvKeyCodes.KEYCODE_POWER, Direction.SHORT)
                         },
                         modifier = Modifier.testTag("btn_power_toggle")
                     ) {
@@ -258,7 +258,7 @@ fun RemoteControlScreen(
                 GlassDpad(
                     onDirectionClick = { keyCode ->
                         performHaptic()
-                        onSendKey(keyCode, KeyDirection.SHORT)
+                        onSendKey(keyCode, Direction.SHORT)
                     },
                     modifier = Modifier.testTag("remote_dpad")
                 )
@@ -267,11 +267,11 @@ fun RemoteControlScreen(
                 TouchpadSurface(
                     onSwipe = { keyCode ->
                         performHaptic()
-                        onSendKey(keyCode, KeyDirection.SHORT)
+                        onSendKey(keyCode, Direction.SHORT)
                     },
                     onTap = {
                         performHaptic()
-                        onSendKey(AndroidTvKeyCodes.KEYCODE_DPAD_CENTER, KeyDirection.SHORT)
+                        onSendKey(AndroidTvKeyCodes.KEYCODE_DPAD_CENTER, Direction.SHORT)
                     },
                     modifier = Modifier.testTag("remote_touchpad")
                 )
@@ -291,7 +291,7 @@ fun RemoteControlScreen(
                     testTag = "btn_nav_back",
                     onClick = {
                         performHaptic()
-                        onSendKey(AndroidTvKeyCodes.KEYCODE_BACK, KeyDirection.SHORT)
+                        onSendKey(AndroidTvKeyCodes.KEYCODE_BACK, Direction.SHORT)
                     }
                 )
                 NavCircleButton(
@@ -301,7 +301,7 @@ fun RemoteControlScreen(
                     testTag = "btn_nav_home",
                     onClick = {
                         performHaptic()
-                        onSendKey(AndroidTvKeyCodes.KEYCODE_HOME, KeyDirection.SHORT)
+                        onSendKey(AndroidTvKeyCodes.KEYCODE_HOME, Direction.SHORT)
                     }
                 )
                 NavCircleButton(
@@ -310,7 +310,7 @@ fun RemoteControlScreen(
                     testTag = "btn_nav_mic",
                     onClick = {
                         performHaptic()
-                        onSendKey(AndroidTvKeyCodes.KEYCODE_ASSIST, KeyDirection.SHORT)
+                        onSendKey(AndroidTvKeyCodes.KEYCODE_ASSIST, Direction.SHORT)
                     }
                 )
                 NavCircleButton(
@@ -399,7 +399,7 @@ fun RemoteControlScreen(
                         IconButton(
                             onClick = {
                                 performHaptic()
-                                onSendKey(AndroidTvKeyCodes.KEYCODE_MEDIA_REWIND, KeyDirection.SHORT)
+                                onSendKey(AndroidTvKeyCodes.KEYCODE_MEDIA_REWIND, Direction.SHORT)
                             },
                             modifier = Modifier.testTag("btn_media_rewind")
                         ) {
@@ -412,7 +412,7 @@ fun RemoteControlScreen(
                         IconButton(
                             onClick = {
                                 performHaptic()
-                                onSendKey(AndroidTvKeyCodes.KEYCODE_MEDIA_PLAY_PAUSE, KeyDirection.SHORT)
+                                onSendKey(AndroidTvKeyCodes.KEYCODE_MEDIA_PLAY_PAUSE, Direction.SHORT)
                             },
                             modifier = Modifier
                                 .size(44.dp)
@@ -429,7 +429,7 @@ fun RemoteControlScreen(
                         IconButton(
                             onClick = {
                                 performHaptic()
-                                onSendKey(AndroidTvKeyCodes.KEYCODE_MEDIA_FAST_FORWARD, KeyDirection.SHORT)
+                                onSendKey(AndroidTvKeyCodes.KEYCODE_MEDIA_FAST_FORWARD, Direction.SHORT)
                             },
                             modifier = Modifier.testTag("btn_media_fast_forward")
                         ) {
@@ -449,7 +449,7 @@ fun RemoteControlScreen(
                         IconButton(
                             onClick = {
                                 performHaptic()
-                                onSendKey(AndroidTvKeyCodes.KEYCODE_VOLUME_MUTE, KeyDirection.SHORT)
+                                onSendKey(AndroidTvKeyCodes.KEYCODE_VOLUME_MUTE, Direction.SHORT)
                             },
                             modifier = Modifier.testTag("btn_vol_mute")
                         ) {
@@ -462,7 +462,7 @@ fun RemoteControlScreen(
                         IconButton(
                             onClick = {
                                 performHaptic()
-                                onSendKey(AndroidTvKeyCodes.KEYCODE_VOLUME_DOWN, KeyDirection.SHORT)
+                                onSendKey(AndroidTvKeyCodes.KEYCODE_VOLUME_DOWN, Direction.SHORT)
                             },
                             modifier = Modifier
                                 .size(40.dp)
@@ -479,7 +479,7 @@ fun RemoteControlScreen(
                         IconButton(
                             onClick = {
                                 performHaptic()
-                                onSendKey(AndroidTvKeyCodes.KEYCODE_VOLUME_UP, KeyDirection.SHORT)
+                                onSendKey(AndroidTvKeyCodes.KEYCODE_VOLUME_UP, Direction.SHORT)
                             },
                             modifier = Modifier
                                 .size(40.dp)

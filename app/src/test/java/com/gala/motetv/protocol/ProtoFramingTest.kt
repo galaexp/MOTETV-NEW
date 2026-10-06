@@ -43,6 +43,40 @@ class ProtoFramingTest {
     }
 
     @Test
+    fun testZeroLengthFrame() {
+        val payload = ByteArray(0)
+        val out = ByteArrayOutputStream()
+        val writer = ProtoFrameWriter(out)
+        writer.writeFrame(payload)
+
+        val `in` = ByteArrayInputStream(out.toByteArray())
+        val reader = ProtoFrameReader(`in`)
+        val readPayload = reader.readNextFrame()
+
+        assertEquals(0, readPayload.size)
+    }
+
+    @Test
+    fun testTwoConsecutiveFrames() {
+        val payload1 = "First Frame".toByteArray(Charsets.UTF_8)
+        val payload2 = "Second Frame".toByteArray(Charsets.UTF_8)
+
+        val out = ByteArrayOutputStream()
+        val writer = ProtoFrameWriter(out)
+        writer.writeFrame(payload1)
+        writer.writeFrame(payload2)
+
+        val `in` = ByteArrayInputStream(out.toByteArray())
+        val reader = ProtoFrameReader(`in`)
+
+        val read1 = reader.readNextFrame()
+        val read2 = reader.readNextFrame()
+
+        assertArrayEquals(payload1, read1)
+        assertArrayEquals(payload2, read2)
+    }
+
+    @Test
     fun testPartialTcpChunkReads() {
         val payload = ByteArray(500) { (it % 256).toByte() }
         val out = ByteArrayOutputStream()
@@ -51,7 +85,7 @@ class ProtoFramingTest {
 
         val fullBytes = out.toByteArray()
 
-        // Simulate fragmented network stream returning 3 bytes per read()
+        // Simulate fragmented network stream returning 1-3 bytes per read()
         val chunkedStream = object : InputStream() {
             private var index = 0
             override fun read(): Int {
@@ -60,7 +94,7 @@ class ProtoFramingTest {
 
             override fun read(b: ByteArray, off: Int, len: Int): Int {
                 if (index >= fullBytes.size) return -1
-                val toRead = minOf(len, 3, fullBytes.size - index)
+                val toRead = minOf(len, 2, fullBytes.size - index)
                 System.arraycopy(fullBytes, index, b, off, toRead)
                 index += toRead
                 return toRead
@@ -68,6 +102,34 @@ class ProtoFramingTest {
         }
 
         val reader = ProtoFrameReader(chunkedStream)
+        val readPayload = reader.readNextFrame()
+        assertArrayEquals(payload, readPayload)
+    }
+
+    @Test
+    fun testSplitVarintAcrossReads() {
+        val payload = ByteArray(300) { 0x42 }
+        val out = ByteArrayOutputStream()
+        val writer = ProtoFrameWriter(out)
+        writer.writeFrame(payload)
+
+        val fullBytes = out.toByteArray()
+
+        // Stream that returns strictly 1 byte per read to test multi-byte varint splits
+        val singleByteStream = object : InputStream() {
+            private var index = 0
+            override fun read(): Int {
+                return if (index < fullBytes.size) fullBytes[index++].toInt() and 0xFF else -1
+            }
+
+            override fun read(b: ByteArray, off: Int, len: Int): Int {
+                if (index >= fullBytes.size) return -1
+                b[off] = fullBytes[index++]
+                return 1
+            }
+        }
+
+        val reader = ProtoFrameReader(singleByteStream)
         val readPayload = reader.readNextFrame()
         assertArrayEquals(payload, readPayload)
     }
@@ -88,6 +150,15 @@ class ProtoFramingTest {
         out.write(ByteArray(20)) // only write 20 bytes
 
         val `in` = ByteArrayInputStream(out.toByteArray())
+        val reader = ProtoFrameReader(`in`)
+        assertThrows(EOFException::class.java) {
+            reader.readNextFrame()
+        }
+    }
+
+    @Test
+    fun testEofDuringMultiByteVarintThrowsEofException() {
+        val `in` = ByteArrayInputStream(byteArrayOf(0x80.toByte())) // Continuation bit set, but stream ends
         val reader = ProtoFrameReader(`in`)
         assertThrows(EOFException::class.java) {
             reader.readNextFrame()

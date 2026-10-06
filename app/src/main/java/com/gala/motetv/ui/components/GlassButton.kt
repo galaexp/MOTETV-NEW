@@ -42,13 +42,20 @@ fun GlassButton(
     modifier: Modifier = Modifier,
     icon: ImageVector? = null,
     isPrimary: Boolean = false,
+    enabled: Boolean = true,
     testTag: String = "glass_button"
 ) {
     val shape = RoundedCornerShape(16.dp)
     val backgroundBrush = if (isPrimary) {
-        Brush.horizontalGradient(
-            colors = listOf(ElectricBluePrimary, ElectricBlueDark)
-        )
+        if (enabled) {
+            Brush.horizontalGradient(
+                colors = listOf(ElectricBluePrimary, ElectricBlueDark)
+            )
+        } else {
+            Brush.horizontalGradient(
+                colors = listOf(ElectricBluePrimary.copy(alpha = 0.4f), ElectricBlueDark.copy(alpha = 0.4f))
+            )
+        }
     } else {
         Brush.verticalGradient(
             colors = listOf(GlassSurfaceElevated, GlassSurface)
@@ -64,6 +71,7 @@ fun GlassButton(
             .background(backgroundBrush)
             .border(BorderStroke(1.dp, borderBrush), shape)
             .clickable(
+                enabled = enabled,
                 interactionSource = remember { MutableInteractionSource() },
                 indication = ripple(color = Color.White),
                 onClick = onClick
@@ -76,7 +84,7 @@ fun GlassButton(
                 Icon(
                     imageVector = icon,
                     contentDescription = null,
-                    tint = TextPrimary,
+                    tint = if (enabled) TextPrimary else TextPrimary.copy(alpha = 0.5f),
                     modifier = Modifier.size(18.dp)
                 )
                 Spacer(modifier = Modifier.width(8.dp))
@@ -84,7 +92,7 @@ fun GlassButton(
             Text(
                 text = text,
                 style = Typography.titleMedium,
-                color = TextPrimary
+                color = if (enabled) TextPrimary else TextPrimary.copy(alpha = 0.5f)
             )
         }
     }
