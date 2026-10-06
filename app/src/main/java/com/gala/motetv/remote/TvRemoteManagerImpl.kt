@@ -194,11 +194,9 @@ class TvRemoteManagerImpl(
             }
 
             msg.remote_ping_request != null -> {
-                val pingReq = msg.remote_ping_request
                 TvLogger.i(TvLogger.TAG_REMOTE, "REMOTE RX:\ntype=REMOTE_PING_REQUEST")
-                val pingVal = pingReq.val1 ?: 0
                 val pongMsg = RemoteMessage(
-                    remote_ping_response = RemotePingResponse(val1 = pingVal)
+                    remote_ping_response = RemotePingResponse(val1 = 1)
                 )
                 TvLogger.i(TvLogger.TAG_REMOTE, "REMOTE TX:\ntype=REMOTE_PING_RESPONSE")
                 sendRemoteMessage(pongMsg)

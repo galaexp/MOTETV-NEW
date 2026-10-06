@@ -158,10 +158,15 @@ class RemoteProtoCodecTest {
     // 10. RemotePingResponse encoding
     @Test
     fun testRemotePingResponseEncoding() {
-        val msg = RemoteMessage(remote_ping_response = RemotePingResponse(val1 = 9876))
-        val decoded = RemoteMessage.ADAPTER.decode(msg.encode())
+        val pingReq = RemoteMessage(remote_ping_request = RemotePingRequest(val1 = 9876, val2 = 5432))
+        val pingDecoded = RemoteMessage.ADAPTER.decode(pingReq.encode())
+        assertNotNull(pingDecoded.remote_ping_request)
+
+        // Protocol requires replying with RemotePingResponse(val1 = 1)
+        val pongMsg = RemoteMessage(remote_ping_response = RemotePingResponse(val1 = 1))
+        val decoded = RemoteMessage.ADAPTER.decode(pongMsg.encode())
         assertNotNull(decoded.remote_ping_response)
-        assertEquals(9876, decoded.remote_ping_response?.val1)
+        assertEquals(1, decoded.remote_ping_response?.val1)
     }
 
     // 11. RemoteError decoding
