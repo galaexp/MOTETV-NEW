@@ -54,8 +54,8 @@ import com.gala.motetv.ui.theme.ElectricBluePrimary
 import com.gala.motetv.ui.theme.GlassBorder
 import com.gala.motetv.ui.theme.GlassSurface
 import com.gala.motetv.ui.theme.GlassSurfaceElevated
-import com.gala.motetv.ui.theme.NavyBackgroundDark
-import com.gala.motetv.ui.theme.NavySurfaceDark
+import com.gala.motetv.ui.theme.BackgroundLight
+import com.gala.motetv.ui.theme.SurfaceCardLight
 import com.gala.motetv.ui.theme.StatusSuccessGreen
 import com.gala.motetv.ui.theme.TextMuted
 import com.gala.motetv.ui.theme.TextPrimary
@@ -74,7 +74,7 @@ fun RemoteShellScreen(
 
     Scaffold(
         modifier = modifier.fillMaxSize(),
-        containerColor = NavyBackgroundDark,
+        containerColor = BackgroundLight,
         topBar = {
             GlassTopBar(
                 connectionState = connectionState,
@@ -353,7 +353,7 @@ fun GlassBottomNavigation(
             .navigationBarsPadding()
             .padding(horizontal = 16.dp, vertical = 8.dp),
         shape = RoundedCornerShape(24.dp),
-        backgroundColor = NavySurfaceDark.copy(alpha = 0.9f),
+        backgroundColor = SurfaceCardLight.copy(alpha = 0.9f),
         borderColor = GlassBorder
     ) {
         Row(

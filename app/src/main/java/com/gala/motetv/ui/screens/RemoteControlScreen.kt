@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -31,19 +32,22 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.ArrowForward
 import androidx.compose.material.icons.filled.ArrowUpward
+import androidx.compose.material.icons.filled.Backspace
+import androidx.compose.material.icons.filled.Cast
 import androidx.compose.material.icons.filled.FastForward
 import androidx.compose.material.icons.filled.FastRewind
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Keyboard
+import androidx.compose.material.icons.filled.KeyboardReturn
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Send
-import androidx.compose.material.icons.filled.SwapHoriz
-import androidx.compose.material.icons.filled.Terminal
+import androidx.compose.material.icons.filled.SkipNext
+import androidx.compose.material.icons.filled.SpaceBar
 import androidx.compose.material.icons.filled.TouchApp
-import androidx.compose.material.icons.filled.Tv
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedTextField
@@ -54,16 +58,19 @@ import androidx.compose.material3.TabRow
 import androidx.compose.material3.TabRowDefaults
 import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
 import androidx.compose.material3.Text
+import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -72,12 +79,20 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.gala.motetv.core.logging.TvLogger
 import com.gala.motetv.core.model.AndroidTvKeyCodes
 import com.gala.motetv.core.model.ConnectionState
 import com.gala.motetv.core.model.TvDevice
-import com.gala.motetv.ui.components.ConnectionStatusBadge
+import com.gala.motetv.launcher.AppDefinition
+import com.gala.motetv.launcher.DefaultApps
 import com.gala.motetv.ui.components.DiagnosticsBottomSheet
 import com.gala.motetv.ui.components.GlassCard
+import com.gala.motetv.ui.components.MousePointerSurface
+import com.gala.motetv.ui.components.NativeTvKeyboardCard
+import com.gala.motetv.ui.components.QuickAppBar
+import com.gala.motetv.ui.components.TvStatusCard
+import com.gala.motetv.ui.theme.BackgroundLight
 import com.gala.motetv.ui.theme.ElectricBlueDark
 import com.gala.motetv.ui.theme.ElectricBlueLight
 import com.gala.motetv.ui.theme.ElectricBluePrimary
@@ -85,12 +100,15 @@ import com.gala.motetv.ui.theme.GlassBorder
 import com.gala.motetv.ui.theme.GlassBorderStrong
 import com.gala.motetv.ui.theme.GlassSurface
 import com.gala.motetv.ui.theme.GlassSurfaceElevated
-import com.gala.motetv.ui.theme.NavyBackgroundDark
-import com.gala.motetv.ui.theme.StatusErrorRed
+import com.gala.motetv.ui.theme.SkipAdAccent
+import com.gala.motetv.ui.theme.SkipAdAccentDark
+import com.gala.motetv.ui.theme.TextMuted
 import com.gala.motetv.ui.theme.TextPrimary
 import com.gala.motetv.ui.theme.TextSecondary
 import com.gala.motetv.ui.theme.Typography
 import com.google.android.apps.tv.remote.protocol.Direction
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 @Composable
 fun RemoteControlScreen(
@@ -98,12 +116,23 @@ fun RemoteControlScreen(
     connectionState: ConnectionState,
     onSendKey: (Int, Direction) -> Unit,
     onSendImeText: (String) -> Unit,
+    onSendImeTextWithFallback: (String, Boolean) -> Unit = { text, _ -> onSendImeText(text) },
+    onSendChar: (Char) -> Unit = {},
+    imeActive: Boolean = false,
+    lastImeText: String = "",
     onOpenDevices: () -> Unit,
     onReconnect: () -> Unit,
     onDisconnect: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    favoriteApps: List<AppDefinition> = DefaultApps.ALL_DEFAULT_APPS.filter { it.isFavorite },
+    onLaunchApp: (AppDefinition) -> Unit = {},
+    onLaunchUrl: (String) -> Unit = {},
+    onPickMediaClick: () -> Unit = {},
+    onOpenAllApps: () -> Unit = {},
+    hapticEnabled: Boolean = true
 ) {
     val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
     val vibrator = remember {
         try {
             context.getSystemService(android.content.Context.VIBRATOR_SERVICE) as? Vibrator
@@ -113,12 +142,13 @@ fun RemoteControlScreen(
     }
 
     fun performHaptic() {
+        if (!hapticEnabled) return
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                vibrator?.vibrate(VibrationEffect.createOneShot(18, VibrationEffect.DEFAULT_AMPLITUDE))
+                vibrator?.vibrate(VibrationEffect.createOneShot(16, VibrationEffect.DEFAULT_AMPLITUDE))
             } else {
                 @Suppress("DEPRECATION")
-                vibrator?.vibrate(18)
+                vibrator?.vibrate(16)
             }
         } catch (_: Exception) {}
     }
@@ -127,88 +157,30 @@ fun RemoteControlScreen(
     var showDiagnostics by remember { mutableStateOf(false) }
     var showKeyboardInput by remember { mutableStateOf(false) }
     var keyboardText by remember { mutableStateOf("") }
+    var skipAdFeedback by remember { mutableStateOf<String?>(null) }
 
     val scrollState = rememberScrollState()
 
     Scaffold(
         modifier = modifier.fillMaxSize(),
-        containerColor = NavyBackgroundDark,
+        containerColor = BackgroundLight,
         topBar = {
-            Row(
+            Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 10.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+                    .statusBarsPadding()
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
             ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(38.dp)
-                            .clip(CircleShape)
-                            .background(ElectricBluePrimary.copy(alpha = 0.2f)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Tv,
-                            contentDescription = null,
-                            tint = ElectricBluePrimary,
-                            modifier = Modifier.size(20.dp)
-                        )
+                TvStatusCard(
+                    device = device,
+                    connectionState = connectionState,
+                    onOpenDevices = onOpenDevices,
+                    onReconnect = onReconnect,
+                    onPowerClick = {
+                        performHaptic()
+                        onSendKey(AndroidTvKeyCodes.KEYCODE_POWER, Direction.SHORT)
                     }
-                    Spacer(modifier = Modifier.width(10.dp))
-                    Column {
-                        Text(
-                            text = device?.name ?: "No TV Connected",
-                            style = Typography.titleMedium,
-                            color = TextPrimary,
-                            maxLines = 1
-                        )
-                        ConnectionStatusBadge(
-                            connectionState = connectionState,
-                            onRetry = onReconnect
-                        )
-                    }
-                }
-
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(
-                        onClick = { showDiagnostics = true },
-                        modifier = Modifier.testTag("btn_top_diagnostics")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Terminal,
-                            contentDescription = "Diagnostics",
-                            tint = TextSecondary
-                        )
-                    }
-                    IconButton(
-                        onClick = onOpenDevices,
-                        modifier = Modifier.testTag("btn_top_devices")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.SwapHoriz,
-                            contentDescription = "Switch TV",
-                            tint = TextSecondary
-                        )
-                    }
-                    IconButton(
-                        onClick = {
-                            performHaptic()
-                            onSendKey(AndroidTvKeyCodes.KEYCODE_POWER, Direction.SHORT)
-                        },
-                        modifier = Modifier.testTag("btn_power_toggle")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.PowerSettingsNew,
-                            contentDescription = "Power",
-                            tint = StatusErrorRed
-                        )
-                    }
-                }
+                )
             }
         }
     ) { innerPadding ->
@@ -217,17 +189,31 @@ fun RemoteControlScreen(
                 .fillMaxSize()
                 .padding(innerPadding)
                 .verticalScroll(scrollState)
-                .padding(horizontal = 20.dp, vertical = 8.dp),
+                .padding(horizontal = 16.dp, vertical = 6.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            // Mode Selector: D-Pad vs Touchpad
+            // Quick Favorite Apps bar
+            if (favoriteApps.isNotEmpty()) {
+                QuickAppBar(
+                    favoriteApps = favoriteApps,
+                    onAppClick = { app ->
+                        performHaptic()
+                        onLaunchApp(app)
+                    },
+                    onOpenAllApps = onOpenAllApps
+                )
+                Spacer(modifier = Modifier.height(14.dp))
+            }
+
+            // Mode Selector: D-Pad vs Touchpad vs Browser Mouse
             TabRow(
                 selectedTabIndex = selectedModeTab,
                 containerColor = GlassSurface,
                 contentColor = ElectricBluePrimary,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(16.dp)),
+                    .clip(RoundedCornerShape(16.dp))
+                    .border(1.dp, GlassBorder, RoundedCornerShape(16.dp)),
                 indicator = { tabPositions ->
                     TabRowDefaults.SecondaryIndicator(
                         modifier = Modifier.tabIndicatorOffset(tabPositions[selectedModeTab]),
@@ -239,145 +225,229 @@ fun RemoteControlScreen(
                 Tab(
                     selected = selectedModeTab == 0,
                     onClick = { selectedModeTab = 0 },
-                    text = { Text("D-Pad Remote", style = Typography.labelLarge) },
+                    text = {
+                        Text(
+                            text = "D-Pad",
+                            style = Typography.labelLarge,
+                            color = if (selectedModeTab == 0) ElectricBluePrimary else TextSecondary
+                        )
+                    },
                     modifier = Modifier.testTag("tab_dpad")
                 )
                 Tab(
                     selected = selectedModeTab == 1,
                     onClick = { selectedModeTab = 1 },
-                    text = { Text("Touchpad Swipe", style = Typography.labelLarge) },
+                    text = {
+                        Text(
+                            text = "Touchpad",
+                            style = Typography.labelLarge,
+                            color = if (selectedModeTab == 1) ElectricBluePrimary else TextSecondary
+                        )
+                    },
                     modifier = Modifier.testTag("tab_touchpad")
                 )
+                Tab(
+                    selected = selectedModeTab == 2,
+                    onClick = { selectedModeTab = 2 },
+                    text = {
+                        Text(
+                            text = "Browser Mouse",
+                            style = Typography.labelLarge,
+                            color = if (selectedModeTab == 2) ElectricBluePrimary else TextSecondary
+                        )
+                    },
+                    modifier = Modifier.testTag("tab_mouse")
+                )
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
+
+            // Main Control Area: D-Pad, Touchpad, or Browser Mouse
+            when (selectedModeTab) {
+                0 -> {
+                    TactileLightDpad(
+                        onDirectionClick = { keyCode ->
+                            performHaptic()
+                            onSendKey(keyCode, Direction.SHORT)
+                        },
+                        modifier = Modifier.testTag("remote_dpad")
+                    )
+                }
+                1 -> {
+                    TouchpadSurface(
+                        onSwipe = { keyCode ->
+                            performHaptic()
+                            onSendKey(keyCode, Direction.SHORT)
+                        },
+                        onTap = {
+                            performHaptic()
+                            onSendKey(AndroidTvKeyCodes.KEYCODE_DPAD_CENTER, Direction.SHORT)
+                        },
+                        modifier = Modifier.testTag("remote_touchpad")
+                    )
+                }
+                2 -> {
+                    MousePointerSurface(
+                        onSendKey = { keyCode ->
+                            onSendKey(keyCode, Direction.SHORT)
+                        },
+                        onLaunchUrl = onLaunchUrl,
+                        onHaptic = { performHaptic() },
+                        modifier = Modifier.testTag("remote_mouse_pointer")
+                    )
+                }
             }
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // Main Control Area
-            if (selectedModeTab == 0) {
-                // Tactical Glass D-Pad
-                GlassDpad(
-                    onDirectionClick = { keyCode ->
-                        performHaptic()
-                        onSendKey(keyCode, Direction.SHORT)
-                    },
-                    modifier = Modifier.testTag("remote_dpad")
-                )
-            } else {
-                // Smooth Gesture Touchpad
-                TouchpadSurface(
-                    onSwipe = { keyCode ->
-                        performHaptic()
-                        onSendKey(keyCode, Direction.SHORT)
-                    },
-                    onTap = {
-                        performHaptic()
-                        onSendKey(AndroidTvKeyCodes.KEYCODE_DPAD_CENTER, Direction.SHORT)
-                    },
-                    modifier = Modifier.testTag("remote_touchpad")
-                )
-            }
-
-            Spacer(modifier = Modifier.height(20.dp))
-
-            // Primary Navigation Cluster (Back, Home, Menu, Mic)
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceEvenly,
-                verticalAlignment = Alignment.CenterVertically
+            // Dedicated Prominent YouTube SKIP AD Button
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(18.dp))
+                    .shadow(2.dp, RoundedCornerShape(18.dp), spotColor = Color(0x33FF9800))
+                    .background(
+                        Brush.horizontalGradient(
+                            listOf(SkipAdAccent, SkipAdAccentDark)
+                        )
+                    )
+                    .border(1.dp, Color.White.copy(alpha = 0.3f), RoundedCornerShape(18.dp))
+                    .pointerInput(Unit) {
+                        // Standard click
+                    }
+                    .padding(vertical = 12.dp, horizontal = 18.dp)
+                    .testTag("btn_skip_ad"),
+                contentAlignment = Alignment.Center
             ) {
-                NavCircleButton(
-                    icon = Icons.AutoMirrored.Filled.ArrowBack,
-                    label = "Back",
-                    testTag = "btn_nav_back",
-                    onClick = {
-                        performHaptic()
-                        onSendKey(AndroidTvKeyCodes.KEYCODE_BACK, Direction.SHORT)
-                    }
-                )
-                NavCircleButton(
-                    icon = Icons.Default.Home,
-                    label = "Home",
-                    isPrimary = true,
-                    testTag = "btn_nav_home",
-                    onClick = {
-                        performHaptic()
-                        onSendKey(AndroidTvKeyCodes.KEYCODE_HOME, Direction.SHORT)
-                    }
-                )
-                NavCircleButton(
-                    icon = Icons.Default.Mic,
-                    label = "Assistant",
-                    testTag = "btn_nav_mic",
-                    onClick = {
-                        performHaptic()
-                        onSendKey(AndroidTvKeyCodes.KEYCODE_ASSIST, Direction.SHORT)
-                    }
-                )
-                NavCircleButton(
-                    icon = Icons.Default.Keyboard,
-                    label = "Keyboard",
-                    testTag = "btn_nav_keyboard",
-                    onClick = {
-                        showKeyboardInput = !showKeyboardInput
-                    }
-                )
-            }
-
-            // Keyboard input drawer
-            AnimatedVisibility(
-                visible = showKeyboardInput,
-                enter = fadeIn(),
-                exit = fadeOut()
-            ) {
-                Column(
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.Center,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(top = 16.dp)
+                        .clip(RoundedCornerShape(18.dp))
+                        .padding(vertical = 2.dp)
                 ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically
+                    IconButton(
+                        onClick = {
+                            performHaptic()
+                            TvLogger.i(TvLogger.TAG_REMOTE, "[YOUTUBE_SKIP_AD] Manual Skip Ad button activated")
+                            skipAdFeedback = "Sent Skip Ad action to TV"
+                            coroutineScope.launch {
+                                // Protocol sequence for YouTube TV Skip Ad:
+                                // UP to focus the Skip Ad button, followed by CENTER to press it.
+                                onSendKey(AndroidTvKeyCodes.KEYCODE_DPAD_UP, Direction.SHORT)
+                                delay(160)
+                                onSendKey(AndroidTvKeyCodes.KEYCODE_DPAD_CENTER, Direction.SHORT)
+                                delay(2000)
+                                skipAdFeedback = null
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth()
                     ) {
-                        OutlinedTextField(
-                            value = keyboardText,
-                            onValueChange = { keyboardText = it },
-                            placeholder = { Text("Type text to send to TV...") },
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedTextColor = TextPrimary,
-                                unfocusedTextColor = TextPrimary,
-                                focusedBorderColor = ElectricBluePrimary,
-                                unfocusedBorderColor = GlassBorder
-                            ),
-                            modifier = Modifier
-                                .weight(1f)
-                                .testTag("input_ime_text")
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        IconButton(
-                            onClick = {
-                                if (keyboardText.isNotBlank()) {
-                                    performHaptic()
-                                    onSendImeText(keyboardText)
-                                    keyboardText = ""
-                                }
-                            },
-                            modifier = Modifier
-                                .size(48.dp)
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(ElectricBluePrimary)
-                                .testTag("btn_send_ime")
-                        ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(
-                                imageVector = Icons.Default.Send,
-                                contentDescription = "Send Text",
-                                tint = Color.White
+                                imageVector = Icons.Default.SkipNext,
+                                contentDescription = "Skip Ad",
+                                tint = Color.White,
+                                modifier = Modifier.size(24.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "SKIP AD",
+                                style = Typography.titleMedium.copy(
+                                    fontWeight = FontWeight.Bold,
+                                    letterSpacing = 1.sp
+                                ),
+                                color = Color.White
                             )
                         }
                     }
                 }
             }
 
-            Spacer(modifier = Modifier.height(20.dp))
+            if (skipAdFeedback != null) {
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = skipAdFeedback ?: "",
+                    style = Typography.labelSmall,
+                    color = SkipAdAccentDark
+                )
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
+
+            // Primary Navigation Cluster (Back, Home, Menu, Mic, Keyboard)
+            GlassCard(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(20.dp),
+                elevation = 2.dp
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    NavCircleButton(
+                        icon = Icons.AutoMirrored.Filled.ArrowBack,
+                        label = "Back",
+                        testTag = "btn_nav_back",
+                        onClick = {
+                            performHaptic()
+                            onSendKey(AndroidTvKeyCodes.KEYCODE_BACK, Direction.SHORT)
+                        }
+                    )
+                    NavCircleButton(
+                        icon = Icons.Default.Home,
+                        label = "Home",
+                        isPrimary = true,
+                        testTag = "btn_nav_home",
+                        onClick = {
+                            performHaptic()
+                            onSendKey(AndroidTvKeyCodes.KEYCODE_HOME, Direction.SHORT)
+                        }
+                    )
+                    NavCircleButton(
+                        icon = Icons.Default.Mic,
+                        label = "Voice",
+                        testTag = "btn_nav_mic",
+                        onClick = {
+                            performHaptic()
+                            onSendKey(AndroidTvKeyCodes.KEYCODE_ASSIST, Direction.SHORT)
+                        }
+                    )
+                    NavCircleButton(
+                        icon = Icons.Default.Keyboard,
+                        label = "Keyboard",
+                        testTag = "btn_nav_keyboard",
+                        onClick = {
+                            showKeyboardInput = !showKeyboardInput
+                        }
+                    )
+                }
+            }
+
+            // Keyboard input drawer
+            AnimatedVisibility(
+                visible = showKeyboardInput || imeActive,
+                enter = fadeIn(),
+                exit = fadeOut()
+            ) {
+                NativeTvKeyboardCard(
+                    imeActive = imeActive,
+                    lastImeText = lastImeText,
+                    onSendImeText = onSendImeTextWithFallback,
+                    onSendKey = { onSendKey(it, Direction.SHORT) },
+                    onSendChar = onSendChar,
+                    onHaptic = { performHaptic() },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 12.dp)
+                )
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
 
             // Volume & Media Playback Cluster
             GlassCard(
@@ -385,17 +455,17 @@ fun RemoteControlScreen(
                     .fillMaxWidth()
                     .testTag("card_media_controls"),
                 shape = RoundedCornerShape(20.dp),
-                backgroundColor = GlassSurface
+                elevation = 2.dp
             ) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(16.dp),
+                        .padding(14.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     // Media controls
-                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         IconButton(
                             onClick = {
                                 performHaptic()
@@ -468,6 +538,7 @@ fun RemoteControlScreen(
                                 .size(40.dp)
                                 .clip(CircleShape)
                                 .background(GlassSurfaceElevated)
+                                .border(1.dp, GlassBorder, CircleShape)
                                 .testTag("btn_vol_down")
                         ) {
                             Icon(
@@ -485,6 +556,7 @@ fun RemoteControlScreen(
                                 .size(40.dp)
                                 .clip(CircleShape)
                                 .background(GlassSurfaceElevated)
+                                .border(1.dp, GlassBorder, CircleShape)
                                 .testTag("btn_vol_up")
                         ) {
                             Icon(
@@ -497,60 +569,74 @@ fun RemoteControlScreen(
                 }
             }
 
-            Spacer(modifier = Modifier.height(20.dp))
+            Spacer(modifier = Modifier.height(14.dp))
 
-            // Quick App Launchers Grid
-            Text(
-                text = "Quick App Launchers",
-                style = Typography.titleSmall,
-                color = TextSecondary,
-                modifier = Modifier.align(Alignment.Start)
-            )
-            Spacer(modifier = Modifier.height(10.dp))
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            // Quick Media Cast Action
+            GlassCard(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("card_quick_cast_media"),
+                shape = RoundedCornerShape(18.dp),
+                elevation = 2.dp
             ) {
-                AppShortcutButton(
-                    name = "YouTube",
-                    color = Color(0xFFFF0000),
-                    modifier = Modifier.weight(1f),
-                    onClick = {
-                        performHaptic()
-                        onSendImeText("https://youtube.com")
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(40.dp)
+                                .clip(CircleShape)
+                                .background(ElectricBluePrimary.copy(alpha = 0.12f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Cast,
+                                contentDescription = "Cast File",
+                                tint = ElectricBluePrimary,
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column {
+                            Text(
+                                text = "Cast File to TV (VLC)",
+                                style = Typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                color = TextPrimary
+                            )
+                            Text(
+                                text = "Direct Wi-Fi stream without screen mirroring",
+                                style = Typography.labelSmall,
+                                color = TextSecondary
+                            )
+                        }
                     }
-                )
-                AppShortcutButton(
-                    name = "Netflix",
-                    color = Color(0xFFE50914),
-                    modifier = Modifier.weight(1f),
-                    onClick = {
-                        performHaptic()
-                        onSendImeText("netflix")
+                    Button(
+                        onClick = {
+                            performHaptic()
+                            onPickMediaClick()
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = ElectricBluePrimary),
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.height(38.dp).testTag("btn_quick_cast_file")
+                    ) {
+                        Text(
+                            text = "Select File",
+                            style = Typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                            color = Color.White
+                        )
                     }
-                )
-                AppShortcutButton(
-                    name = "Prime",
-                    color = Color(0xFF00A8E1),
-                    modifier = Modifier.weight(1f),
-                    onClick = {
-                        performHaptic()
-                        onSendImeText("prime video")
-                    }
-                )
-                AppShortcutButton(
-                    name = "Spotify",
-                    color = Color(0xFF1DB954),
-                    modifier = Modifier.weight(1f),
-                    onClick = {
-                        performHaptic()
-                        onSendImeText("spotify")
-                    }
-                )
+                }
             }
 
-            Spacer(modifier = Modifier.height(30.dp))
+            Spacer(modifier = Modifier.height(24.dp))
         }
     }
 
@@ -560,15 +646,20 @@ fun RemoteControlScreen(
 }
 
 @Composable
-fun GlassDpad(
+fun TactileLightDpad(
     onDirectionClick: (Int) -> Unit,
     modifier: Modifier = Modifier
 ) {
     Box(
         modifier = modifier
             .size(240.dp)
+            .shadow(4.dp, CircleShape, spotColor = Color(0x1F0F172A), ambientColor = Color(0x0F0F172A))
             .clip(CircleShape)
-            .background(GlassSurface)
+            .background(
+                Brush.radialGradient(
+                    listOf(GlassSurfaceElevated, GlassSurface)
+                )
+            )
             .border(1.5.dp, GlassBorderStrong, CircleShape),
         contentAlignment = Alignment.Center
     ) {
@@ -644,6 +735,7 @@ fun GlassDpad(
         Box(
             modifier = Modifier
                 .size(76.dp)
+                .shadow(4.dp, CircleShape, spotColor = Color(0x335B6CFF))
                 .clip(CircleShape)
                 .background(
                     Brush.radialGradient(
@@ -676,14 +768,19 @@ fun TouchpadSurface(
 ) {
     var dragAccumX by remember { mutableFloatStateOf(0f) }
     var dragAccumY by remember { mutableFloatStateOf(0f) }
-    val swipeThreshold = 45f
+    val swipeThreshold = 42f
 
     Box(
         modifier = modifier
             .fillMaxWidth()
             .height(240.dp)
+            .shadow(3.dp, RoundedCornerShape(24.dp), spotColor = Color(0x1F0F172A))
             .clip(RoundedCornerShape(24.dp))
-            .background(GlassSurface)
+            .background(
+                Brush.verticalGradient(
+                    listOf(GlassSurfaceElevated, GlassSurface)
+                )
+            )
             .border(1.5.dp, GlassBorderStrong, RoundedCornerShape(24.dp))
             .pointerInput(Unit) {
                 detectDragGestures(
@@ -716,17 +813,28 @@ fun TouchpadSurface(
             },
         contentAlignment = Alignment.Center
     ) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Icon(
-                imageVector = Icons.Default.TouchApp,
-                contentDescription = null,
-                tint = ElectricBluePrimary.copy(alpha = 0.6f),
-                modifier = Modifier.size(42.dp)
-            )
-            Spacer(modifier = Modifier.height(8.dp))
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier.padding(16.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(54.dp)
+                    .clip(CircleShape)
+                    .background(ElectricBluePrimary.copy(alpha = 0.12f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.TouchApp,
+                    contentDescription = null,
+                    tint = ElectricBluePrimary,
+                    modifier = Modifier.size(30.dp)
+                )
+            }
+            Spacer(modifier = Modifier.height(10.dp))
             Text(
                 text = "Swipe to navigate • Tap to select",
-                style = Typography.bodyMedium,
+                style = Typography.bodyMedium.copy(fontWeight = FontWeight.Medium),
                 color = TextSecondary
             )
         }
@@ -746,6 +854,7 @@ fun NavCircleButton(
             onClick = onClick,
             modifier = Modifier
                 .size(54.dp)
+                .shadow(if (isPrimary) 3.dp else 1.dp, CircleShape, spotColor = Color(0x1F0F172A))
                 .clip(CircleShape)
                 .background(
                     if (isPrimary) {
@@ -770,33 +879,5 @@ fun NavCircleButton(
             style = Typography.labelSmall,
             color = TextSecondary
         )
-    }
-}
-
-@Composable
-fun AppShortcutButton(
-    name: String,
-    color: Color,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    GlassCard(
-        modifier = modifier
-            .testTag("btn_app_${name.lowercase()}"),
-        shape = RoundedCornerShape(14.dp),
-        onClick = onClick
-    ) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(vertical = 12.dp),
-            contentAlignment = Alignment.Center
-        ) {
-            Text(
-                text = name,
-                style = Typography.labelMedium.copy(fontWeight = FontWeight.Bold),
-                color = color
-            )
-        }
     }
 }

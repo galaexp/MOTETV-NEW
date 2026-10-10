@@ -48,8 +48,8 @@ import com.gala.motetv.ui.theme.ElectricBlueLight
 import com.gala.motetv.ui.theme.ElectricBluePrimary
 import com.gala.motetv.ui.theme.GlassBorder
 import com.gala.motetv.ui.theme.GlassSurfaceElevated
-import com.gala.motetv.ui.theme.NavyCardDark
 import com.gala.motetv.ui.theme.StatusErrorRed
+import com.gala.motetv.ui.theme.SurfaceCardLight
 import com.gala.motetv.ui.theme.TextMuted
 import com.gala.motetv.ui.theme.TextPrimary
 import com.gala.motetv.ui.theme.TextSecondary
@@ -98,7 +98,7 @@ fun PinEntryDialog(
             dismissOnClickOutside = false,
             usePlatformDefaultWidth = true
         ),
-        containerColor = NavyCardDark,
+        containerColor = SurfaceCardLight,
         shape = RoundedCornerShape(24.dp),
         title = {
             Row(verticalAlignment = Alignment.CenterVertically) {

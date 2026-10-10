@@ -55,9 +55,9 @@ import com.gala.motetv.ui.theme.GlassBorder
 import com.gala.motetv.ui.theme.GlassBorderStrong
 import com.gala.motetv.ui.theme.GlassSurface
 import com.gala.motetv.ui.theme.GlassSurfaceElevated
-import com.gala.motetv.ui.theme.NavyBackgroundDark
-import com.gala.motetv.ui.theme.NavyCardDark
+import com.gala.motetv.ui.theme.BackgroundLight
 import com.gala.motetv.ui.theme.StatusSuccessGreen
+import com.gala.motetv.ui.theme.SurfaceCardLight
 import com.gala.motetv.ui.theme.TextMuted
 import com.gala.motetv.ui.theme.TextPrimary
 import com.gala.motetv.ui.theme.TextSecondary
@@ -78,7 +78,7 @@ fun DevicesScreen(
 
     Scaffold(
         modifier = modifier.fillMaxSize(),
-        containerColor = NavyBackgroundDark,
+        containerColor = BackgroundLight,
         topBar = {
             Row(
                 modifier = Modifier
@@ -356,7 +356,7 @@ fun ManualDeviceDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        containerColor = NavyCardDark,
+        containerColor = SurfaceCardLight,
         title = {
             Text(text = "Add Device Manually", style = Typography.titleLarge, color = TextPrimary)
         },

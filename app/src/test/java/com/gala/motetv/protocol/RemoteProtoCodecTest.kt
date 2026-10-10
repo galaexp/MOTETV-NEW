@@ -295,4 +295,75 @@ class RemoteProtoCodecTest {
         state = RemoteState.READY
         assertEquals(RemoteState.READY, state)
     }
+
+    // 17. RemoteAppLinkLaunchRequest encoding and decoding (Tag 90)
+    @Test
+    fun testRemoteAppLinkLaunchRequestEncodingDecoding() {
+        val appLinkMsg = RemoteMessage(
+            remote_app_link_launch_request = com.google.android.apps.tv.remote.protocol.RemoteAppLinkLaunchRequest(
+                app_link = "https://www.youtube.com"
+            )
+        )
+        val encoded = appLinkMsg.encode()
+        val decoded = RemoteMessage.ADAPTER.decode(encoded)
+        assertNotNull(decoded.remote_app_link_launch_request)
+        assertEquals("https://www.youtube.com", decoded.remote_app_link_launch_request?.app_link)
+    }
+
+    // 18. RemoteImeKeyInject encoding and decoding (Tag 20)
+    @Test
+    fun testRemoteImeKeyInjectEncodingDecoding() {
+        val imeMsg = RemoteMessage(
+            remote_ime_key_inject = RemoteImeKeyInject(
+                app_info = 0,
+                text = "Interstellar 4K"
+            )
+        )
+        val encoded = imeMsg.encode()
+        val decoded = RemoteMessage.ADAPTER.decode(encoded)
+        assertNotNull(decoded.remote_ime_key_inject)
+        assertEquals(0, decoded.remote_ime_key_inject?.app_info)
+        assertEquals("Interstellar 4K", decoded.remote_ime_key_inject?.text)
+    }
+
+    // 19. Character to Keycode mapping test
+    @Test
+    fun testCharacterKeycodeMapping() {
+        assertEquals(AndroidTvKeyCodes.KEYCODE_A, AndroidTvKeyCodes.getKeyCodeForChar('a'))
+        assertEquals(AndroidTvKeyCodes.KEYCODE_A, AndroidTvKeyCodes.getKeyCodeForChar('A'))
+        assertEquals(AndroidTvKeyCodes.KEYCODE_Z, AndroidTvKeyCodes.getKeyCodeForChar('z'))
+        assertEquals(AndroidTvKeyCodes.KEYCODE_0, AndroidTvKeyCodes.getKeyCodeForChar('0'))
+        assertEquals(AndroidTvKeyCodes.KEYCODE_9, AndroidTvKeyCodes.getKeyCodeForChar('9'))
+        assertEquals(AndroidTvKeyCodes.KEYCODE_SPACE, AndroidTvKeyCodes.getKeyCodeForChar(' '))
+        assertEquals(AndroidTvKeyCodes.KEYCODE_ENTER, AndroidTvKeyCodes.getKeyCodeForChar('\n'))
+        assertEquals(AndroidTvKeyCodes.KEYCODE_DEL, AndroidTvKeyCodes.getKeyCodeForChar('\b'))
+        assertEquals(AndroidTvKeyCodes.KEYCODE_PERIOD, AndroidTvKeyCodes.getKeyCodeForChar('.'))
+        assertEquals(AndroidTvKeyCodes.KEYCODE_SLASH, AndroidTvKeyCodes.getKeyCodeForChar('/'))
+    }
+
+    // 20. Browser mouse and navigation keycodes
+    @Test
+    fun testBrowserNavigationKeycodes() {
+        assertEquals(92, AndroidTvKeyCodes.KEYCODE_PAGE_UP)
+        assertEquals(93, AndroidTvKeyCodes.KEYCODE_PAGE_DOWN)
+        assertEquals(82, AndroidTvKeyCodes.KEYCODE_MENU)
+        assertEquals(61, AndroidTvKeyCodes.KEYCODE_TAB)
+        assertEquals(168, AndroidTvKeyCodes.KEYCODE_REFRESH)
+        assertEquals(125, AndroidTvKeyCodes.KEYCODE_FORWARD)
+        assertEquals("KEYCODE_PAGE_UP", AndroidTvKeyCodes.getKeyName(AndroidTvKeyCodes.KEYCODE_PAGE_UP))
+        assertEquals("KEYCODE_PAGE_DOWN", AndroidTvKeyCodes.getKeyName(AndroidTvKeyCodes.KEYCODE_PAGE_DOWN))
+    }
+
+    // 21. VLC Deep Link and Media Streaming App Link
+    @Test
+    fun testVlcMediaStreamAppLink() {
+        val vlcUrl = "vlc://http://192.168.1.150:8989/media"
+        val msg = RemoteMessage(
+            remote_app_link_launch_request = com.google.android.apps.tv.remote.protocol.RemoteAppLinkLaunchRequest(
+                app_link = vlcUrl
+            )
+        )
+        val decoded = RemoteMessage.ADAPTER.decode(msg.encode())
+        assertEquals(vlcUrl, decoded.remote_app_link_launch_request?.app_link)
+    }
 }

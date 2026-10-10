@@ -9,6 +9,7 @@ import com.gala.motetv.protocol.androidtv.ProtoFrameReader
 import com.gala.motetv.storage.TvCredentialStore
 import com.google.android.apps.tv.remote.protocol.DeviceInfo
 import com.google.android.apps.tv.remote.protocol.Direction
+import com.google.android.apps.tv.remote.protocol.RemoteAppLinkLaunchRequest
 import com.google.android.apps.tv.remote.protocol.RemoteConfigure
 import com.google.android.apps.tv.remote.protocol.RemoteImeKeyInject
 import com.google.android.apps.tv.remote.protocol.RemoteKeyInject
@@ -44,6 +45,12 @@ class TvRemoteManagerImpl(
 
     private val _currentDevice = MutableStateFlow<TvDevice?>(null)
     override val currentDevice: StateFlow<TvDevice?> = _currentDevice.asStateFlow()
+
+    private val _imeActive = MutableStateFlow(false)
+    override val imeActive: StateFlow<Boolean> = _imeActive.asStateFlow()
+
+    private val _lastImeText = MutableStateFlow("")
+    override val lastImeText: StateFlow<String> = _lastImeText.asStateFlow()
 
     private var connectionJob: Job? = null
     private var readLoopJob: Job? = null
@@ -212,6 +219,14 @@ class TvRemoteManagerImpl(
                 updateRemoteState(RemoteState.ERROR)
             }
 
+            msg.remote_ime_key_inject != null -> {
+                val ime = msg.remote_ime_key_inject
+                val text = ime.text ?: ""
+                TvLogger.i(TvLogger.TAG_REMOTE, "REMOTE RX:\ntype=REMOTE_IME_KEY_INJECT text='$text' app_info=${ime.app_info}")
+                _imeActive.value = true
+                _lastImeText.value = text
+            }
+
             else -> {
                 TvLogger.d(TvLogger.TAG_REMOTE, "REMOTE RX:\ntype=UNKNOWN")
             }
@@ -253,8 +268,26 @@ class TvRemoteManagerImpl(
     }
 
     override fun sendImeText(text: String) {
+        sendImeTextWithFallback(text, useKeyCodesFallback = false)
+    }
+
+    override fun sendImeTextWithFallback(text: String, useKeyCodesFallback: Boolean) {
         if (_remoteState.value != RemoteState.READY) {
             TvLogger.w(TvLogger.TAG_REMOTE, "Cannot send IME text: remoteState is ${_remoteState.value}, expected READY")
+            return
+        }
+
+        if (useKeyCodesFallback) {
+            TvLogger.i(TvLogger.TAG_REMOTE, "REMOTE TX:\ntype=DIRECT_KEYCODES text='$text'")
+            scope.launch(Dispatchers.IO) {
+                for (c in text) {
+                    val keyCode = AndroidTvKeyCodes.getKeyCodeForChar(c)
+                    if (keyCode != null) {
+                        sendKey(keyCode, Direction.SHORT)
+                        kotlinx.coroutines.delay(35)
+                    }
+                }
+            }
             return
         }
 
@@ -268,6 +301,36 @@ class TvRemoteManagerImpl(
                 sendRemoteMessage(imeMsg)
             } catch (e: Exception) {
                 TvLogger.e(TvLogger.TAG_REMOTE, "Failed to send IME text '$text': ${e.message}", e)
+            }
+        }
+    }
+
+    override fun sendChar(char: Char) {
+        val keyCode = AndroidTvKeyCodes.getKeyCodeForChar(char)
+        if (keyCode != null) {
+            sendKey(keyCode, Direction.SHORT)
+        } else {
+            sendImeText(char.toString())
+        }
+    }
+
+    override fun launchAppLink(appLink: String) {
+        if (_remoteState.value != RemoteState.READY) {
+            TvLogger.w(TvLogger.TAG_REMOTE, "Cannot launch app link '$appLink': remoteState is ${_remoteState.value}, expected READY")
+            return
+        }
+
+        TvLogger.i(TvLogger.TAG_REMOTE, "REMOTE TX:\ntype=APP_LINK_LAUNCH link='$appLink'")
+
+        scope.launch(Dispatchers.IO) {
+            try {
+                val appLinkMsg = RemoteMessage(
+                    remote_app_link_launch_request = RemoteAppLinkLaunchRequest(app_link = appLink)
+                )
+                sendRemoteMessage(appLinkMsg)
+                TvLogger.i(TvLogger.TAG_REMOTE, "[APP_LAUNCH_SUCCESS] Sent App Link Launch Request via protocol for: $appLink")
+            } catch (e: Exception) {
+                TvLogger.e(TvLogger.TAG_REMOTE, "[APP_LAUNCH_FAILURE] Failed to launch app link '$appLink': ${e.message}", e)
             }
         }
     }
@@ -312,6 +375,8 @@ class TvRemoteManagerImpl(
             transport?.close()
         } catch (_: Exception) {}
         transport = null
+        _imeActive.value = false
+        _lastImeText.value = ""
         configureReceivedDeferred?.cancel()
         setActiveReceivedDeferred?.cancel()
         configureReceivedDeferred = null

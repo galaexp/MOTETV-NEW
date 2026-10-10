@@ -21,6 +21,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -42,38 +43,61 @@ fun GlassButton(
     modifier: Modifier = Modifier,
     icon: ImageVector? = null,
     isPrimary: Boolean = false,
+    customAccent: Color? = null,
     enabled: Boolean = true,
     testTag: String = "glass_button"
 ) {
     val shape = RoundedCornerShape(16.dp)
-    val backgroundBrush = if (isPrimary) {
-        if (enabled) {
+
+    val backgroundBrush = when {
+        customAccent != null -> {
             Brush.horizontalGradient(
-                colors = listOf(ElectricBluePrimary, ElectricBlueDark)
-            )
-        } else {
-            Brush.horizontalGradient(
-                colors = listOf(ElectricBluePrimary.copy(alpha = 0.4f), ElectricBlueDark.copy(alpha = 0.4f))
+                colors = listOf(customAccent, customAccent.copy(alpha = 0.85f))
             )
         }
-    } else {
-        Brush.verticalGradient(
-            colors = listOf(GlassSurfaceElevated, GlassSurface)
-        )
+        isPrimary -> {
+            if (enabled) {
+                Brush.horizontalGradient(
+                    colors = listOf(ElectricBluePrimary, ElectricBlueDark)
+                )
+            } else {
+                Brush.horizontalGradient(
+                    colors = listOf(ElectricBluePrimary.copy(alpha = 0.4f), ElectricBlueDark.copy(alpha = 0.4f))
+                )
+            }
+        }
+        else -> {
+            Brush.verticalGradient(
+                colors = listOf(GlassSurfaceElevated, GlassSurface)
+            )
+        }
     }
-    val borderBrush = if (isPrimary) GlassBorderStrong else GlassBorder
+
+    val borderStroke = when {
+        isPrimary || customAccent != null -> BorderStroke(1.dp, GlassBorderStrong.copy(alpha = 0.3f))
+        else -> BorderStroke(1.dp, GlassBorder)
+    }
+
+    val contentColor = when {
+        !enabled -> TextPrimary.copy(alpha = 0.4f)
+        isPrimary || customAccent != null -> Color.White
+        else -> TextPrimary
+    }
+
+    val elevation = if (isPrimary || customAccent != null) 3.dp else 1.dp
 
     Box(
         modifier = modifier
             .testTag(testTag)
+            .shadow(elevation = if (enabled) elevation else 0.dp, shape = shape, spotColor = Color(0x1F0F172A))
             .defaultMinSize(minHeight = 48.dp)
             .clip(shape)
             .background(backgroundBrush)
-            .border(BorderStroke(1.dp, borderBrush), shape)
+            .border(borderStroke, shape)
             .clickable(
                 enabled = enabled,
                 interactionSource = remember { MutableInteractionSource() },
-                indication = ripple(color = Color.White),
+                indication = ripple(color = if (isPrimary || customAccent != null) Color.White.copy(alpha = 0.3f) else Color.Black.copy(alpha = 0.1f)),
                 onClick = onClick
             )
             .padding(horizontal = 20.dp, vertical = 12.dp),
@@ -84,7 +108,7 @@ fun GlassButton(
                 Icon(
                     imageVector = icon,
                     contentDescription = null,
-                    tint = if (enabled) TextPrimary else TextPrimary.copy(alpha = 0.5f),
+                    tint = contentColor,
                     modifier = Modifier.size(18.dp)
                 )
                 Spacer(modifier = Modifier.width(8.dp))
@@ -92,7 +116,7 @@ fun GlassButton(
             Text(
                 text = text,
                 style = Typography.titleMedium,
-                color = if (enabled) TextPrimary else TextPrimary.copy(alpha = 0.5f)
+                color = contentColor
             )
         }
     }

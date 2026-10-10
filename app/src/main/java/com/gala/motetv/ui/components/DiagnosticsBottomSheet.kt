@@ -50,8 +50,8 @@ import com.gala.motetv.core.logging.TvLogger
 import com.gala.motetv.ui.theme.ElectricBluePrimary
 import com.gala.motetv.ui.theme.GlassBorder
 import com.gala.motetv.ui.theme.GlassSurfaceElevated
-import com.gala.motetv.ui.theme.NavyBackgroundDark
-import com.gala.motetv.ui.theme.NavyCardDark
+import com.gala.motetv.ui.theme.BackgroundLight
+import com.gala.motetv.ui.theme.SurfaceCardLight
 import com.gala.motetv.ui.theme.StatusErrorRed
 import com.gala.motetv.ui.theme.StatusSuccessGreen
 import com.gala.motetv.ui.theme.TextMuted
@@ -81,7 +81,7 @@ fun DiagnosticsBottomSheet(
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
-        containerColor = NavyCardDark,
+        containerColor = SurfaceCardLight,
         modifier = modifier.testTag("diagnostics_bottom_sheet")
     ) {
         Column(
@@ -191,7 +191,7 @@ fun DiagnosticsBottomSheet(
                     .fillMaxWidth()
                     .weight(1f)
                     .clip(RoundedCornerShape(12.dp))
-                    .background(NavyBackgroundDark)
+                    .background(BackgroundLight)
                     .padding(12.dp)
             ) {
                 if (filteredLogs.isEmpty()) {

@@ -10,6 +10,8 @@ interface TvRemoteManager {
     val connectionState: StateFlow<ConnectionState>
     val remoteState: StateFlow<RemoteState>
     val currentDevice: StateFlow<TvDevice?>
+    val imeActive: StateFlow<Boolean>
+    val lastImeText: StateFlow<String>
 
     fun connect(device: TvDevice)
     fun disconnect()
@@ -18,4 +20,7 @@ interface TvRemoteManager {
         sendKey(button.keyCode, direction)
     }
     fun sendImeText(text: String)
+    fun sendImeTextWithFallback(text: String, useKeyCodesFallback: Boolean = false)
+    fun sendChar(char: Char)
+    fun launchAppLink(appLink: String)
 }
