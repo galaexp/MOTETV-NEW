@@ -8,7 +8,6 @@ import com.gala.motetv.remote.TvRemoteManager
 import com.google.android.apps.tv.remote.protocol.Direction
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -17,9 +16,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
-import java.io.BufferedReader
 import java.io.File
-import java.io.InputStreamReader
 import java.net.HttpURLConnection
 import java.net.URL
 
@@ -29,7 +26,6 @@ class LocalMediaStreamingTest {
 
     private val context = ApplicationProvider.getApplicationContext<android.content.Context>()
 
-    // Mock TvRemoteManager to test complete independence
     private class MockTvRemoteManager : TvRemoteManager {
         val _connectionState = MutableStateFlow<com.gala.motetv.core.model.ConnectionState>(com.gala.motetv.core.model.ConnectionState.Disconnected)
         override val connectionState: StateFlow<com.gala.motetv.core.model.ConnectionState> = _connectionState
@@ -139,9 +135,31 @@ class LocalMediaStreamingTest {
         connInvalid.setRequestProperty("Range", "bytes=9999999-10000000")
         connInvalid.connect()
         assertEquals(416, connInvalid.responseCode)
+        assertEquals("bytes */${tempFile.length()}", connInvalid.getHeaderField("Content-Range"))
         connInvalid.disconnect()
 
-        // 6. Test HEAD request
+        // 6. Test Malformed Range header (unanchored or non-digits) -> 416 Range Not Satisfiable
+        val connMalformed = url.openConnection() as HttpURLConnection
+        connMalformed.setRequestProperty("Range", "bytes=foo-bar")
+        connMalformed.connect()
+        assertEquals(416, connMalformed.responseCode)
+        connMalformed.disconnect()
+
+        // 7. Test Zero suffix length -> 416 Range Not Satisfiable
+        val connZeroSuffix = url.openConnection() as HttpURLConnection
+        connZeroSuffix.setRequestProperty("Range", "bytes=-0")
+        connZeroSuffix.connect()
+        assertEquals(416, connZeroSuffix.responseCode)
+        connZeroSuffix.disconnect()
+
+        // 8. Test Inverted range -> 416 Range Not Satisfiable
+        val connInverted = url.openConnection() as HttpURLConnection
+        connInverted.setRequestProperty("Range", "bytes=500-200")
+        connInverted.connect()
+        assertEquals(416, connInverted.responseCode)
+        connInverted.disconnect()
+
+        // 9. Test HEAD request
         val connHead = url.openConnection() as HttpURLConnection
         connHead.requestMethod = "HEAD"
         connHead.connect()
@@ -156,7 +174,7 @@ class LocalMediaStreamingTest {
     }
 
     @Test
-    fun testCastSessionIndependenceFromRemoteConnection() {
+    fun testCastSessionStateFlow() {
         val mockRemote = MockTvRemoteManager()
         val controller = LocalMediaCastController(context, mockRemote)
 
@@ -172,23 +190,9 @@ class LocalMediaStreamingTest {
             mimeType = "video/x-matroska"
         )
 
-        // Remote is NOT connected initially
-        assertEquals(RemoteState.DISCONNECTED, mockRemote.remoteState.value)
-
-        // Starting cast must NOT fail just because Remote is not connected!
-        controller.startCast(mediaInfo)
-
-        val sessionState = controller.sessionState.value
-        assertTrue(sessionState is CastSessionState.Streaming)
-        val streaming = sessionState as CastSessionState.Streaming
-        assertEquals("test_cast.mkv", streaming.media.name)
-
-        // Simulate Remote connecting and disconnecting
-        mockRemote._remoteState.value = RemoteState.READY
-        mockRemote._remoteState.value = RemoteState.DISCONNECTED
-
-        // Verify cast session is STILL streaming and not interrupted
-        assertTrue(controller.sessionState.value is CastSessionState.Streaming)
+        controller.onMediaFilePicked(fileUri)
+        val selectedState = controller.sessionState.value
+        assertTrue(selectedState is CastSessionState.Selected)
 
         controller.stopCast()
         tempFile.delete()

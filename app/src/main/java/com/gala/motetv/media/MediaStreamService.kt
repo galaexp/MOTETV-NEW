@@ -137,18 +137,18 @@ class MediaStreamService : Service() {
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 // targetSdk 36 requires specifying foregroundServiceType
-                // We use FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE (0x10) or SPECIAL_USE
-                val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
-                } else {
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
-                }
+                // We use FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+                val type = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
                 startForeground(NOTIFICATION_ID, notification, type)
             } else {
                 startForeground(NOTIFICATION_ID, notification)
             }
         } catch (e: Exception) {
             TvLogger.e(TvLogger.TAG_GENERAL, "[MEDIA_STREAM_SERVICE] startForeground failed: ${e.message}", e)
+            _streamingState.value = CastSessionState.Error("Foreground service startup failed: ${e.message}")
+            releaseLocks()
+            stopSelf()
+            return
         }
 
         // Acquire Locks
@@ -215,16 +215,20 @@ class MediaStreamService : Service() {
         try {
             if (wifiLock == null) {
                 val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
-                val lockType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    WifiManager.WIFI_MODE_FULL_LOW_LATENCY
-                } else {
-                    @Suppress("DEPRECATION")
-                    WifiManager.WIFI_MODE_FULL_HIGH_PERF
-                }
+                // Use WIFI_MODE_FULL_HIGH_PERF (or fallback to WIFI_MODE_FULL).
+                // Note on API 29+ deprecation: WIFI_MODE_FULL_LOW_LATENCY is only active while the screen
+                // is ON and the app is foregrounded according to Android documentation.
+                // In contrast, WIFI_MODE_FULL_HIGH_PERF is explicitly documented to maintain high-performance
+                // Wi-Fi operation with minimum packet loss even when the device screen is off.
+                // On modern Android releases where WIFI_MODE_FULL_HIGH_PERF is deprecated, the platform
+                // gracefully maps it to low power dissipation while keeping lock semantics active.
+                @Suppress("DEPRECATION")
+                val lockType = WifiManager.WIFI_MODE_FULL_HIGH_PERF
+
                 wifiLock = wm?.createWifiLock(lockType, "MoteTV:MediaCastingWifiLock")?.apply {
                     setReferenceCounted(false)
                     acquire()
-                    TvLogger.i(TvLogger.TAG_GENERAL, "[MEDIA_STREAM_SERVICE] WifiLock acquired (type=$lockType)")
+                    TvLogger.i(TvLogger.TAG_GENERAL, "[MEDIA_STREAM_SERVICE] WifiLock acquired (mode=FULL_HIGH_PERF)")
                 }
             }
         } catch (e: Exception) {

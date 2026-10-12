@@ -12,13 +12,16 @@ import com.gala.motetv.core.model.AndroidTvKeyCodes
 import com.gala.motetv.remote.RemoteState
 import com.gala.motetv.remote.TvRemoteManager
 import com.google.android.apps.tv.remote.protocol.Direction
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 data class SelectedMediaInfo(
     val uri: Uri,
@@ -49,6 +52,7 @@ class LocalMediaCastController(
 
     private var boundService: MediaStreamService? = null
     private var isBound = false
+    private var serviceConnectedDeferred = CompletableDeferred<MediaStreamService>()
 
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
@@ -56,13 +60,16 @@ class LocalMediaCastController(
             val svc = binder?.getService()
             boundService = svc
             isBound = true
+            if (svc != null && !serviceConnectedDeferred.isCompleted) {
+                serviceConnectedDeferred.complete(svc)
+            }
             TvLogger.i(TvLogger.TAG_GENERAL, "[LOCAL_MEDIA_CAST_CONTROLLER] Bound to MediaStreamService")
 
             // Observe streaming state from service
             if (svc != null) {
                 scope.launch {
                     svc.streamingState.collect { state ->
-                        // Only override if active, or if we were streaming
+                        // Reflect active streaming or error state in UI
                         if (state is CastSessionState.Streaming || state is CastSessionState.Error) {
                             _sessionState.value = state
                         } else if (state is CastSessionState.Idle && _sessionState.value is CastSessionState.Streaming) {
@@ -76,6 +83,7 @@ class LocalMediaCastController(
         override fun onServiceDisconnected(name: ComponentName?) {
             boundService = null
             isBound = false
+            serviceConnectedDeferred = CompletableDeferred()
             TvLogger.i(TvLogger.TAG_GENERAL, "[LOCAL_MEDIA_CAST_CONTROLLER] Unbound from MediaStreamService")
         }
     }
@@ -103,49 +111,92 @@ class LocalMediaCastController(
     }
 
     /**
-     * Starts local streaming by launching MediaStreamService in foreground and
-     * sending launch request to Android TV VLC.
+     * Starts local streaming by launching MediaStreamService in foreground, waiting for the
+     * server to bind and produce the canonical stream URL, and then sending the launch request
+     * to VLC on the TV.
      */
     fun startCast(mediaInfo: SelectedMediaInfo, useDirectHttpFallback: Boolean = false) {
-        val tempServer = LocalMediaServer(context)
-        val hostIp = tempServer.getLocalWifiIpAddress()
-        val streamUrl = "http://$hostIp:8989/media"
-
+        // Provide immediate UI feedback that initialization has begun
         _sessionState.value = CastSessionState.Streaming(
             media = mediaInfo,
-            streamUrl = streamUrl,
+            streamUrl = "Starting server...",
             isPlaying = true,
-            statusMessage = "Starting playback on TV via VLC..."
+            statusMessage = "Starting local streaming server..."
         )
 
         scope.launch(Dispatchers.IO) {
             try {
                 TvLogger.i(TvLogger.TAG_GENERAL, "[MEDIA_CAST] Starting MediaStreamService for ${mediaInfo.name}")
 
+                // Reset deferred if previously completed
+                if (serviceConnectedDeferred.isCompleted && boundService == null) {
+                    serviceConnectedDeferred = CompletableDeferred()
+                }
+
                 // 1. Start foreground service
                 MediaStreamService.startStreaming(context, mediaInfo)
 
-                // Bind if not bound
+                // 2. Ensure service is bound
                 if (!isBound) {
                     val intent = Intent(context, MediaStreamService::class.java)
                     context.bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
                 }
 
-                // Dispatch to TV if Remote is ready.
-                // NOTE: TV Remote connection is separate from the HTTP stream!
+                val svc = boundService ?: withTimeoutOrNull(5000L) {
+                    serviceConnectedDeferred.await()
+                }
+
+                if (svc == null) {
+                    val errMsg = "Failed to connect to streaming service."
+                    TvLogger.e(TvLogger.TAG_GENERAL, "[MEDIA_CAST] $errMsg")
+                    _sessionState.value = CastSessionState.Error(errMsg)
+                    MediaStreamService.stopStreaming(context)
+                    return@launch
+                }
+
+                // 3. Wait for MediaStreamService to report a bound socket and reachable LAN URL
+                val streamingState = withTimeoutOrNull(10000L) {
+                    svc.streamingState.first { state ->
+                        state is CastSessionState.Streaming || state is CastSessionState.Error
+                    }
+                }
+
+                if (streamingState == null) {
+                    val errMsg = "Timed out waiting for streaming server to start."
+                    TvLogger.e(TvLogger.TAG_GENERAL, "[MEDIA_CAST] $errMsg")
+                    _sessionState.value = CastSessionState.Error(errMsg)
+                    MediaStreamService.stopStreaming(context)
+                    return@launch
+                }
+
+                if (streamingState is CastSessionState.Error) {
+                    TvLogger.e(TvLogger.TAG_GENERAL, "[MEDIA_CAST] Server startup failed: ${streamingState.message}")
+                    _sessionState.value = streamingState
+                    MediaStreamService.stopStreaming(context)
+                    return@launch
+                }
+
+                val activeStream = streamingState as CastSessionState.Streaming
+                val streamUrl = activeStream.streamUrl
+                TvLogger.i(TvLogger.TAG_GENERAL, "[MEDIA_CAST] Server verified active at: $streamUrl")
+
+                // 4. Dispatch to TV if Remote is ready.
+                // If remote-control is not ready, surface clear status to the user.
                 if (remoteManager.remoteState.value == RemoteState.READY) {
                     val launchUri = if (useDirectHttpFallback) streamUrl else "vlc://$streamUrl"
                     TvLogger.i(TvLogger.TAG_REMOTE, "[MEDIA_CAST] Dispatching launch to TV: $launchUri")
                     remoteManager.launchAppLink(launchUri)
                 } else {
-                    TvLogger.w(
-                        TvLogger.TAG_REMOTE,
-                        "[MEDIA_CAST] Remote is not currently connected (${remoteManager.remoteState.value}), but HTTP streaming service is running at $streamUrl"
+                    val disconnectedMsg = "Stream server ready at $streamUrl, but TV Remote is not connected. Connect remote to start VLC playback."
+                    TvLogger.w(TvLogger.TAG_REMOTE, "[MEDIA_CAST] $disconnectedMsg")
+                    _sessionState.value = activeStream.copy(
+                        statusMessage = disconnectedMsg
                     )
                 }
             } catch (e: Exception) {
                 TvLogger.e(TvLogger.TAG_GENERAL, "[MEDIA_CAST] Cast error: ${e.message}", e)
                 _sessionState.value = CastSessionState.Error(e.message ?: "Failed to start streaming")
+                MediaStreamService.stopStreaming(context)
             }
         }
     }

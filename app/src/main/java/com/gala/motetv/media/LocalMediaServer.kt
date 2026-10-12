@@ -15,7 +15,6 @@ import kotlinx.coroutines.launch
 import java.io.BufferedReader
 import java.io.File
 import java.io.FileInputStream
-import java.io.FileOutputStream
 import java.io.InputStreamReader
 import java.io.OutputStream
 import java.net.Inet4Address
@@ -68,8 +67,12 @@ class LocalMediaServer(
 
     companion object {
         const val DEFAULT_PORT = 8989
-        // Matches "bytes=start-end", "bytes=start-", or "bytes=-suffix"
-        private val RANGE_HEADER_PATTERN = Pattern.compile("bytes=(\\d*)-(\\d*)")
+
+        // Strict pattern anchored to the entire byte-range-spec or suffix-byte-range-spec:
+        // Group 1 = start, Group 2 = end: bytes=100-200
+        // Group 3 = start without end:    bytes=100-
+        // Group 4 = suffix length:        bytes=-200
+        private val STRICT_RANGE_PATTERN = Pattern.compile("^bytes=(?:(\\d+)-(\\d+)|(\\d+)-|-(\\d+))$")
         private const val CHUNK_BUFFER_SIZE = 64 * 1024 // 64 KB
     }
 
@@ -292,44 +295,99 @@ class LocalMediaServer(
             val totalLength = if (session.fileSize > 0L) session.fileSize else descriptor.statSize
             val hasKnownLength = totalLength > 0L
 
-            var isRangeRequest = !rangeHeader.isNullOrBlank()
+            var isRangeRequest = false
             var startByte = 0L
             var endByte = if (hasKnownLength) totalLength - 1L else -1L
 
-            if (isRangeRequest && hasKnownLength) {
-                val matcher = RANGE_HEADER_PATTERN.matcher(rangeHeader ?: "")
-                if (matcher.find()) {
-                    val startStr = matcher.group(1)
-                    val endStr = matcher.group(2)
+            if (!rangeHeader.isNullOrBlank()) {
+                val trimmedRange = rangeHeader.trim()
+                val matcher = STRICT_RANGE_PATTERN.matcher(trimmedRange)
 
-                    if (startStr.isNullOrBlank() && !endStr.isNullOrBlank()) {
-                        // Suffix byte range: bytes=-500 (last 500 bytes)
-                        val suffixLen = endStr.toLongOrNull() ?: 0L
-                        startByte = (totalLength - suffixLen).coerceAtLeast(0L)
-                        endByte = totalLength - 1L
-                    } else if (!startStr.isNullOrBlank()) {
-                        startByte = startStr.toLongOrNull() ?: 0L
-                        if (!endStr.isNullOrBlank()) {
-                            endByte = endStr.toLongOrNull() ?: (totalLength - 1L)
-                        } else {
-                            endByte = totalLength - 1L
-                        }
-                    } else {
-                        isRangeRequest = false
-                    }
-                } else {
-                    isRangeRequest = false
-                }
-
-                // Check range validity
-                if (startByte < 0L || startByte >= totalLength || endByte < startByte) {
-                    TvLogger.w(TvLogger.TAG_GENERAL, "[LOCAL_MEDIA_SERVER] Invalid Range requested: $rangeHeader (size=$totalLength)")
+                if (!matcher.matches()) {
+                    // Header did not match strictly anchored bytes= format (e.g. malformed or unsupported multi-range)
+                    TvLogger.w(TvLogger.TAG_GENERAL, "[LOCAL_MEDIA_SERVER] Malformed or unanchored Range header: '$rangeHeader'")
                     sendRangeNotSatisfiable(output, totalLength)
                     return
                 }
 
-                // Coerce endByte to totalLength - 1
-                endByte = endByte.coerceAtMost(totalLength - 1L)
+                val groupStart = matcher.group(1)
+                val groupEnd = matcher.group(2)
+                val groupStartOnly = matcher.group(3)
+                val groupSuffix = matcher.group(4)
+
+                if (groupSuffix != null) {
+                    // Suffix byte range: bytes=-suffixLength
+                    val suffixLen = try {
+                        groupSuffix.toLong()
+                    } catch (_: NumberFormatException) {
+                        -1L
+                    }
+
+                    // Zero-length suffix or overflow is invalid
+                    if (suffixLen <= 0L || !hasKnownLength) {
+                        TvLogger.w(TvLogger.TAG_GENERAL, "[LOCAL_MEDIA_SERVER] Invalid suffix range: $rangeHeader (suffixLen=$suffixLen)")
+                        sendRangeNotSatisfiable(output, totalLength)
+                        return
+                    }
+
+                    startByte = (totalLength - suffixLen).coerceAtLeast(0L)
+                    endByte = totalLength - 1L
+                    isRangeRequest = true
+                } else if (groupStart != null && groupEnd != null) {
+                    // bytes=start-end
+                    val parsedStart = try {
+                        groupStart.toLong()
+                    } catch (_: NumberFormatException) {
+                        -1L
+                    }
+                    val parsedEnd = try {
+                        groupEnd.toLong()
+                    } catch (_: NumberFormatException) {
+                        -1L
+                    }
+
+                    if (parsedStart < 0L || parsedEnd < 0L || parsedEnd < parsedStart) {
+                        TvLogger.w(TvLogger.TAG_GENERAL, "[LOCAL_MEDIA_SERVER] Malformed range offsets: $rangeHeader")
+                        sendRangeNotSatisfiable(output, totalLength)
+                        return
+                    }
+
+                    if (hasKnownLength && parsedStart >= totalLength) {
+                        TvLogger.w(TvLogger.TAG_GENERAL, "[LOCAL_MEDIA_SERVER] Unsatisfiable range: start ($parsedStart) >= totalLength ($totalLength)")
+                        sendRangeNotSatisfiable(output, totalLength)
+                        return
+                    }
+
+                    startByte = parsedStart
+                    endByte = if (hasKnownLength) parsedEnd.coerceAtMost(totalLength - 1L) else parsedEnd
+                    isRangeRequest = true
+                } else if (groupStartOnly != null) {
+                    // bytes=start-
+                    val parsedStart = try {
+                        groupStartOnly.toLong()
+                    } catch (_: NumberFormatException) {
+                        -1L
+                    }
+
+                    if (parsedStart < 0L) {
+                        TvLogger.w(TvLogger.TAG_GENERAL, "[LOCAL_MEDIA_SERVER] Negative start offset: $rangeHeader")
+                        sendRangeNotSatisfiable(output, totalLength)
+                        return
+                    }
+
+                    if (hasKnownLength && parsedStart >= totalLength) {
+                        TvLogger.w(TvLogger.TAG_GENERAL, "[LOCAL_MEDIA_SERVER] Unsatisfiable range: start ($parsedStart) >= totalLength ($totalLength)")
+                        sendRangeNotSatisfiable(output, totalLength)
+                        return
+                    }
+
+                    startByte = parsedStart
+                    endByte = if (hasKnownLength) totalLength - 1L else -1L
+                    isRangeRequest = true
+                } else {
+                    sendRangeNotSatisfiable(output, totalLength)
+                    return
+                }
             } else {
                 isRangeRequest = false
                 startByte = 0L
@@ -338,7 +396,7 @@ class LocalMediaServer(
                 }
             }
 
-            val contentLength = if (hasKnownLength) {
+            val contentLength = if (hasKnownLength && endByte >= startByte) {
                 (endByte - startByte + 1L).coerceAtLeast(0L)
             } else {
                 -1L
@@ -347,7 +405,11 @@ class LocalMediaServer(
             val headerBuilder = StringBuilder()
             if (isRangeRequest) {
                 headerBuilder.append("HTTP/1.1 206 Partial Content\r\n")
-                headerBuilder.append("Content-Range: bytes $startByte-$endByte/$totalLength\r\n")
+                if (hasKnownLength) {
+                    headerBuilder.append("Content-Range: bytes $startByte-$endByte/$totalLength\r\n")
+                } else {
+                    headerBuilder.append("Content-Range: bytes $startByte-$endByte/*\r\n")
+                }
             } else {
                 headerBuilder.append("HTTP/1.1 200 OK\r\n")
             }
@@ -401,7 +463,12 @@ class LocalMediaServer(
     }
 
     private fun sendRangeNotSatisfiable(output: OutputStream, totalLength: Long) {
-        val response = "HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */$totalLength\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        val contentRangeHeader = if (totalLength > 0L) {
+            "Content-Range: bytes */$totalLength\r\n"
+        } else {
+            "Content-Range: bytes */*\r\n"
+        }
+        val response = "HTTP/1.1 416 Range Not Satisfiable\r\n${contentRangeHeader}Content-Length: 0\r\nConnection: close\r\n\r\n"
         output.write(response.toByteArray(Charsets.UTF_8))
         output.flush()
     }
