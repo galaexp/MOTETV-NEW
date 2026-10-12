@@ -96,7 +96,10 @@ class MainActivity : ComponentActivity() {
         super.onDestroy()
         discoveryManager.stopDiscovery()
         remoteManager.disconnect()
-        castController.stopCast()
+        // Do NOT call castController.stopCast() here!
+        // Casting is owned by MediaStreamService and must continue playing while screen is off,
+        // device is locked, or activity is recreated.
+        castController.cleanUpOnAppExit()
         pairingManager.cancelPairing()
         networkMonitor.stopMonitoring()
     }
