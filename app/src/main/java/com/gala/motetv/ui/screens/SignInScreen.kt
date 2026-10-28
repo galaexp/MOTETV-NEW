@@ -223,6 +223,29 @@ fun SignInScreen(
 
                 Spacer(modifier = Modifier.height(14.dp))
 
+                OutlinedButton(
+                    onClick = {
+                        authManager.setGuestMode(true)
+                    },
+                    enabled = !isLoading,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                        .testTag("btn_guest_mode"),
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        contentColor = Color(0xFF38BDF8)
+                    ),
+                    border = BorderStroke(1.dp, Color(0xFF38BDF8).copy(alpha = 0.5f)),
+                    shape = RoundedCornerShape(16.dp)
+                ) {
+                    Text(
+                        text = "Use Offline / Local TV Control Only",
+                        style = Typography.titleSmall.copy(fontWeight = FontWeight.SemiBold)
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(14.dp))
+
                 Text(
                     text = "New or existing user: One tap automatically sets up your account",
                     style = Typography.bodySmall,

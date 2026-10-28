@@ -7,7 +7,6 @@ import androidx.credentials.CustomCredential
 import com.example.R
 import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption
 import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
-import com.google.firebase.FirebaseApp
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.FirebaseUser
 import com.google.firebase.auth.GoogleAuthProvider
@@ -33,6 +32,10 @@ class AuthManager(private val context: Context) {
     private val _errorMessage = MutableStateFlow<String?>(null)
     val errorMessage: StateFlow<String?> = _errorMessage.asStateFlow()
 
+    // Explicit guest mode: Allows full local TV control (remote, mirror, cast) without requiring cloud login
+    private val _isGuestMode = MutableStateFlow(false)
+    val isGuestMode: StateFlow<Boolean> = _isGuestMode.asStateFlow()
+
     private val authStateListener = FirebaseAuth.AuthStateListener { firebaseAuth ->
         _currentUser.value = firebaseAuth.currentUser
     }
@@ -43,16 +46,40 @@ class AuthManager(private val context: Context) {
         } catch (_: Exception) {}
     }
 
+    fun setGuestMode(enabled: Boolean) {
+        _isGuestMode.value = enabled
+        _errorMessage.value = null
+    }
+
     suspend fun signInWithGoogle(contextForCredential: Context): Boolean {
         _isLoading.value = true
         _errorMessage.value = null
-        try {
-            val webClientId = try {
-                contextForCredential.getString(R.string.default_web_client_id)
-            } catch (e: Exception) {
-                "1098385313983-j7rk9t0e8ltitmggaek972v1khuh0bn5.apps.googleusercontent.com"
-            }
 
+        // Validate Firebase availability
+        if (auth == null) {
+            val msg = "Firebase Authentication is not available on this device."
+            android.util.Log.e("AuthManager", msg)
+            _errorMessage.value = msg
+            _isLoading.value = false
+            return false
+        }
+
+        // Validate Web Client ID from resources without hardcoded fallback disguise
+        val webClientId = try {
+            contextForCredential.getString(R.string.default_web_client_id).trim()
+        } catch (e: Exception) {
+            ""
+        }
+
+        if (webClientId.isEmpty()) {
+            val msg = "Google Sign-In is not configured: default_web_client_id is missing in strings.xml."
+            android.util.Log.e("AuthManager", msg)
+            _errorMessage.value = msg
+            _isLoading.value = false
+            return false
+        }
+
+        try {
             val googleIdOption = GetSignInWithGoogleOption.Builder(
                 serverClientId = webClientId
             ).build()
@@ -69,38 +96,63 @@ class AuthManager(private val context: Context) {
                 val googleIdTokenCredential = GoogleIdTokenCredential.createFrom(credential.data)
                 val googleIdToken = googleIdTokenCredential.idToken
                 val firebaseCredential = GoogleAuthProvider.getCredential(googleIdToken, null)
-                
-                if (auth != null) {
-                    try {
-                        // Explicitly sign out to clear any potentially conflicting stale sessions
-                        // before attempting a fresh sign-in with the new credential.
-                        auth.signOut()
-                        auth.signInWithCredential(firebaseCredential).await()
-                    } catch (e: com.google.firebase.auth.FirebaseAuthUserCollisionException) {
-                        android.util.Log.e("AuthManager", "Account collision: ${e.message}", e)
-                        throw Exception("An account already exists with this email address, but it uses a different sign-in method. Please sign in using your original method.", e)
-                    } catch (e: Exception) {
-                        android.util.Log.e("AuthManager", "Firebase Sign-In failed", e)
-                        throw e
-                    }
+
+                // Sign in to Firebase with the credential (without unnecessary prior signOut)
+                val authResult = auth.signInWithCredential(firebaseCredential).await()
+                val user = authResult.user
+
+                if (user == null) {
+                    val msg = "Authentication failed: No user account was returned by Firebase."
+                    _errorMessage.value = msg
+                    _isLoading.value = false
+                    return false
                 }
+
+                _currentUser.value = user
+                _isGuestMode.value = false
                 _isLoading.value = false
                 return true
             } else {
-                throw IllegalStateException("Unexpected credential type received")
+                val msg = "Unexpected credential type received: ${credential::class.java.simpleName}"
+                _errorMessage.value = msg
+                _isLoading.value = false
+                return false
             }
+        } catch (e: androidx.credentials.exceptions.GetCredentialCancellationException) {
+            android.util.Log.d("AuthManager", "User cancelled Google Sign-In")
+            _errorMessage.value = "Sign-in was cancelled."
+            _isLoading.value = false
+            return false
+        } catch (e: com.google.firebase.auth.FirebaseAuthUserCollisionException) {
+            android.util.Log.e("AuthManager", "Account collision: ${e.message}", e)
+            _errorMessage.value = "An account already exists with this email using a different sign-in method."
+            _isLoading.value = false
+            return false
         } catch (e: Exception) {
             android.util.Log.e("AuthManager", "Google Sign-In failed: ${e.message}", e)
-            _errorMessage.value = "Sign-in failed: ${e.localizedMessage ?: "Unknown error"}"
+            val rawMsg = e.localizedMessage ?: "Unknown authentication error"
+            _errorMessage.value = if (rawMsg.contains("16") || rawMsg.contains("Account reauth failed")) {
+                "Account verification failed (16). Please check Google Play Services or network connection."
+            } else {
+                "Sign-in failed: $rawMsg"
+            }
             _isLoading.value = false
             return false
         }
     }
 
+    /**
+     * Signs out of Firebase without tearing down any active local Android TV remote connection.
+     * Transitions user state to guest mode so local controls remain accessible.
+     */
     fun signOut() {
         try {
             auth?.signOut()
-        } catch (_: Exception) {}
+        } catch (e: Exception) {
+            android.util.Log.e("AuthManager", "Error signing out: ${e.message}")
+        }
         _currentUser.value = null
+        _isGuestMode.value = true
+        _errorMessage.value = null
     }
 }

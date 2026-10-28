@@ -91,7 +91,8 @@ class MainActivity : ComponentActivity() {
         setContent {
             MoteTvTheme {
                 val currentUser by authManager.currentUser.collectAsStateWithLifecycle()
-                if (currentUser == null) {
+                val isGuestMode by authManager.isGuestMode.collectAsStateWithLifecycle()
+                if (currentUser == null && !isGuestMode) {
                     SignInScreen(authManager = authManager)
                 } else {
                     MainAppHost(

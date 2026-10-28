@@ -22,6 +22,7 @@ import androidx.compose.material.icons.filled.Cast
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Language
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.ScreenShare
 import androidx.compose.material.icons.filled.Stop
@@ -66,6 +67,7 @@ fun MirrorScreen(
     val webUrl by mirrorController.webUrl.collectAsStateWithLifecycle()
     val currentFps by mirrorController.currentFps.collectAsStateWithLifecycle()
     val activeViewers by mirrorController.activeViewers.collectAsStateWithLifecycle()
+    val statusMessage by mirrorController.statusMessage.collectAsStateWithLifecycle()
 
     var launchStatusFeedback by remember { mutableStateOf<String?>(null) }
 
@@ -213,18 +215,38 @@ fun MirrorScreen(
                     Spacer(modifier = Modifier.height(16.dp))
 
                     Text(
-                        text = "Phone Display Is Broadcasting",
+                        text = if (activeViewers > 0) "Streaming to Android TV" else "Capture Active (Broadcasting)",
                         style = Typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                        color = Color.White
+                        color = if (activeViewers > 0) Color(0xFF10B981) else Color.White
                     )
 
                     Text(
-                        text = "Active Viewers: $activeViewers",
-                        style = Typography.bodySmall,
-                        color = Color(0xFF94A3B8)
+                        text = if (activeViewers > 0) "$activeViewers active viewer connected" else "0 active viewers • Open stream on TV to play",
+                        style = Typography.bodySmall.copy(fontWeight = FontWeight.Medium),
+                        color = if (activeViewers > 0) Color(0xFF10B981) else Color(0xFF94A3B8)
                     )
 
-                    Spacer(modifier = Modifier.height(24.dp))
+                    Spacer(modifier = Modifier.height(6.dp))
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Lock,
+                            contentDescription = "Secured",
+                            tint = Color(0xFF38BDF8),
+                            modifier = Modifier.size(13.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = "Secured with temporary session token",
+                            style = Typography.labelSmall,
+                            color = Color(0xFF64748B)
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(20.dp))
 
                     // Launch on TV Actions
                     Text(
@@ -243,8 +265,14 @@ fun MirrorScreen(
                         Button(
                             onClick = {
                                 coroutineScope.launch {
-                                    val ok = mirrorController.launchOnTvViaVlc()
-                                    launchStatusFeedback = if (ok) "Stream sent to VLC on TV" else "TV offline or VLC not ready"
+                                    when (val res = mirrorController.launchOnTvViaVlc()) {
+                                        is com.gala.motetv.mirror.TvLaunchResult.Dispatched -> {
+                                            launchStatusFeedback = res.message
+                                        }
+                                        is com.gala.motetv.mirror.TvLaunchResult.Failed -> {
+                                            launchStatusFeedback = "Failed: ${res.error}"
+                                        }
+                                    }
                                 }
                             },
                             modifier = Modifier
@@ -264,8 +292,14 @@ fun MirrorScreen(
                         Button(
                             onClick = {
                                 coroutineScope.launch {
-                                    val ok = mirrorController.launchOnTvViaBrowser()
-                                    launchStatusFeedback = if (ok) "Web stream opened on TV browser" else "TV offline or browser not ready"
+                                    when (val res = mirrorController.launchOnTvViaBrowser()) {
+                                        is com.gala.motetv.mirror.TvLaunchResult.Dispatched -> {
+                                            launchStatusFeedback = res.message
+                                        }
+                                        is com.gala.motetv.mirror.TvLaunchResult.Failed -> {
+                                            launchStatusFeedback = "Failed: ${res.error}"
+                                        }
+                                    }
                                 }
                             },
                             modifier = Modifier
@@ -287,8 +321,8 @@ fun MirrorScreen(
                         Spacer(modifier = Modifier.height(10.dp))
                         Text(
                             text = launchStatusFeedback ?: "",
-                            style = Typography.bodySmall,
-                            color = Color(0xFF38BDF8),
+                            style = Typography.bodySmall.copy(fontWeight = FontWeight.Medium),
+                            color = if (launchStatusFeedback?.startsWith("Failed") == true) Color(0xFFEF4444) else Color(0xFF38BDF8),
                             textAlign = TextAlign.Center
                         )
                     }
