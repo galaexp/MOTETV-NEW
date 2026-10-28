@@ -43,6 +43,11 @@ import com.gala.motetv.ui.theme.MoteTvTheme
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import com.gala.motetv.media.LocalMediaCastController
+import com.gala.motetv.auth.AuthManager
+import com.gala.motetv.ui.screens.SignInScreen
+
+import com.gala.motetv.mirror.ScreenMirrorController
+import com.gala.motetv.ui.screens.MirrorScreen
 
 enum class MainDisplayMode {
     TABS,
@@ -56,7 +61,9 @@ class MainActivity : ComponentActivity() {
     private lateinit var pairingManager: TvPairingManagerImpl
     private lateinit var remoteManager: TvRemoteManagerImpl
     private lateinit var castController: LocalMediaCastController
+    private lateinit var mirrorController: ScreenMirrorController
     private lateinit var networkMonitor: NetworkMonitor
+    private lateinit var authManager: AuthManager
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -68,7 +75,9 @@ class MainActivity : ComponentActivity() {
         pairingManager = TvPairingManagerImpl(credentialStore)
         remoteManager = TvRemoteManagerImpl(credentialStore)
         castController = LocalMediaCastController(applicationContext, remoteManager)
+        mirrorController = ScreenMirrorController(applicationContext, remoteManager)
         networkMonitor = NetworkMonitor(applicationContext)
+        authManager = AuthManager(applicationContext)
 
         networkMonitor.startMonitoring {
             TvLogger.i(TvLogger.TAG_DISCOVERY, "Network changed, triggering auto-discovery")
@@ -81,13 +90,20 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             MoteTvTheme {
-                MainAppHost(
-                    credentialStore = credentialStore,
-                    discoveryManager = discoveryManager,
-                    pairingManager = pairingManager,
-                    remoteManager = remoteManager,
-                    castController = castController
-                )
+                val currentUser by authManager.currentUser.collectAsStateWithLifecycle()
+                if (currentUser == null) {
+                    SignInScreen(authManager = authManager)
+                } else {
+                    MainAppHost(
+                        credentialStore = credentialStore,
+                        discoveryManager = discoveryManager,
+                        pairingManager = pairingManager,
+                        remoteManager = remoteManager,
+                        castController = castController,
+                        mirrorController = mirrorController,
+                        authManager = authManager
+                    )
+                }
             }
         }
     }
@@ -111,7 +127,9 @@ fun MainAppHost(
     discoveryManager: NsdTvDiscoveryManager,
     pairingManager: TvPairingManagerImpl,
     remoteManager: TvRemoteManagerImpl,
-    castController: LocalMediaCastController
+    castController: LocalMediaCastController,
+    mirrorController: ScreenMirrorController,
+    authManager: AuthManager
 ) {
     var displayMode by remember { mutableStateOf(MainDisplayMode.TABS) }
     var selectedTab by remember { mutableStateOf(NavTab.REMOTE) }
@@ -240,6 +258,14 @@ fun MainAppHost(
                                     selectedTab = NavTab.APPS
                                 },
                                 hapticEnabled = credentialStore.isHapticEnabled()
+                            )
+                        }
+
+                        NavTab.MIRROR -> {
+                            MirrorScreen(
+                                mirrorController = mirrorController,
+                                targetDevice = targetDevice,
+                                connectionState = connectionState
                             )
                         }
 

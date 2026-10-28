@@ -2,25 +2,25 @@ package com.gala.motetv.ui.theme
 
 import android.app.Activity
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.lightColorScheme
+import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.SideEffect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
 
-private val LightColorScheme = lightColorScheme(
-    primary = ElectricBluePrimary,
-    onPrimary = Color.White,
-    primaryContainer = ElectricBlueLight.copy(alpha = 0.15f),
-    onPrimaryContainer = ElectricBlueDark,
-    secondary = ElectricBlueLight,
-    onSecondary = Color.White,
-    background = BackgroundLight,
+private val DarkColorScheme = darkColorScheme(
+    primary = ElectricBlueLight,
+    onPrimary = Color(0xFF090D16),
+    primaryContainer = ElectricBlueDark,
+    onPrimaryContainer = Color.White,
+    secondary = CyanNeon,
+    onSecondary = Color(0xFF090D16),
+    background = BackgroundDark,
     onBackground = TextPrimary,
-    surface = SurfaceLight,
+    surface = SurfaceDark,
     onSurface = TextPrimary,
-    surfaceVariant = SurfaceCardLight,
+    surfaceVariant = SurfaceCardDark,
     onSurfaceVariant = TextSecondary,
     error = StatusErrorRed,
     onError = Color.White
@@ -36,14 +36,15 @@ fun MoteTvTheme(
             val window = (view.context as? Activity)?.window
             if (window != null) {
                 val insetsController = WindowCompat.getInsetsController(window, view)
-                insetsController.isAppearanceLightStatusBars = true
-                insetsController.isAppearanceLightNavigationBars = true
+                // Dark status bar and navigation bar with white icons
+                insetsController.isAppearanceLightStatusBars = false
+                insetsController.isAppearanceLightNavigationBars = false
             }
         }
     }
 
     MaterialTheme(
-        colorScheme = LightColorScheme,
+        colorScheme = DarkColorScheme,
         typography = Typography,
         content = content
     )

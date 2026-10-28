@@ -1,19 +1,12 @@
 package com.gala.motetv.ui.screens
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -21,47 +14,24 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Link
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Tv
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedTextFieldDefaults
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
+import androidx.compose.material.icons.filled.Wifi
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.gala.motetv.core.model.TvDevice
-import com.gala.motetv.ui.components.GlassButton
 import com.gala.motetv.ui.components.GlassCard
-import com.gala.motetv.ui.theme.ElectricBlueDark
-import com.gala.motetv.ui.theme.ElectricBlueLight
-import com.gala.motetv.ui.theme.ElectricBluePrimary
-import com.gala.motetv.ui.theme.GlassBorder
-import com.gala.motetv.ui.theme.GlassBorderStrong
-import com.gala.motetv.ui.theme.GlassSurface
-import com.gala.motetv.ui.theme.GlassSurfaceElevated
-import com.gala.motetv.ui.theme.BackgroundLight
-import com.gala.motetv.ui.theme.StatusSuccessGreen
-import com.gala.motetv.ui.theme.SurfaceCardLight
-import com.gala.motetv.ui.theme.TextMuted
-import com.gala.motetv.ui.theme.TextPrimary
-import com.gala.motetv.ui.theme.TextSecondary
-import com.gala.motetv.ui.theme.Typography
+import com.gala.motetv.ui.theme.*
 
 @Composable
 fun DevicesScreen(
@@ -74,90 +44,86 @@ fun DevicesScreen(
     onBack: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    BackHandler { onBack() }
     var showManualDialog by remember { mutableStateOf(false) }
 
-    Scaffold(
-        modifier = modifier.fillMaxSize(),
-        containerColor = BackgroundLight,
-        topBar = {
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .background(BackgroundDark)
+            .statusBarsPadding()
+            .padding(16.dp)
+    ) {
+        Column(
+            modifier = Modifier.fillMaxSize(),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            // TOP BAR
             Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 12.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     IconButton(
                         onClick = onBack,
                         modifier = Modifier
-                            .testTag("devices_back_button")
                             .size(40.dp)
+                            .clip(CircleShape)
+                            .background(Color(0xFF1E293B))
+                            .border(1.dp, Color(0xFF334155), CircleShape)
                     ) {
                         Icon(
                             imageVector = Icons.AutoMirrored.Filled.ArrowBack,
                             contentDescription = "Back",
-                            tint = TextPrimary
+                            tint = Color.White
                         )
                     }
-                    Spacer(modifier = Modifier.width(8.dp))
+
+                    Spacer(modifier = Modifier.width(12.dp))
+
                     Text(
-                        text = "Available TVs",
-                        style = Typography.titleLarge,
-                        color = TextPrimary
+                        text = "Connect Android TV",
+                        style = Typography.titleLarge.copy(fontWeight = FontWeight.Bold),
+                        color = Color.White
                     )
                 }
 
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    // Manual IP Button
                     IconButton(
                         onClick = { showManualDialog = true },
                         modifier = Modifier
-                            .testTag("btn_manual_add")
                             .size(40.dp)
+                            .clip(CircleShape)
+                            .background(Color(0xFF1E293B))
+                            .border(1.dp, Color(0xFF334155), CircleShape)
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.Add,
-                            contentDescription = "Add Manually",
-                            tint = TextPrimary
-                        )
+                        Icon(Icons.Default.Add, contentDescription = "Manual IP", tint = Color(0xFF38BDF8))
                     }
+
+                    // Rescan Button
                     IconButton(
-                        onClick = if (isDiscovering) onStopScan else onStartScan,
+                        onClick = { if (isDiscovering) onStopScan() else onStartScan() },
                         modifier = Modifier
-                            .testTag("btn_rescan")
                             .size(40.dp)
+                            .clip(CircleShape)
+                            .background(Color(0xFF1E293B))
+                            .border(1.dp, Color(0xFF334155), CircleShape)
                     ) {
                         if (isDiscovering) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(20.dp),
-                                color = ElectricBluePrimary,
-                                strokeWidth = 2.dp
-                            )
+                            CircularProgressIndicator(modifier = Modifier.size(20.dp), color = Color(0xFF38BDF8), strokeWidth = 2.dp)
                         } else {
-                            Icon(
-                                imageVector = Icons.Default.Refresh,
-                                contentDescription = "Scan Again",
-                                tint = TextPrimary
-                            )
+                            Icon(Icons.Default.Refresh, contentDescription = "Scan", tint = Color.White)
                         }
                     }
                 }
             }
-        }
-    ) { innerPadding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(innerPadding)
-                .padding(horizontal = 20.dp)
-        ) {
-            // Header status card
+
+            // RADAR SCAN STATUS CARD
             GlassCard(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("discovery_status_card"),
-                shape = RoundedCornerShape(20.dp),
-                backgroundColor = GlassSurfaceElevated
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(22.dp)
             ) {
                 Row(
                     modifier = Modifier
@@ -167,45 +133,44 @@ fun DevicesScreen(
                 ) {
                     Box(
                         modifier = Modifier
-                            .size(44.dp)
+                            .size(48.dp)
                             .clip(CircleShape)
-                            .background(ElectricBluePrimary.copy(alpha = 0.2f)),
+                            .background(Color(0xFF0284C7).copy(alpha = 0.2f))
+                            .border(1.dp, Color(0xFF38BDF8), CircleShape),
                         contentAlignment = Alignment.Center
                     ) {
-                        if (isDiscovering) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(24.dp),
-                                color = ElectricBluePrimary,
-                                strokeWidth = 2.5.dp
-                            )
-                        } else {
-                            Icon(
-                                imageVector = Icons.Default.Tv,
-                                contentDescription = null,
-                                tint = ElectricBluePrimary,
-                                modifier = Modifier.size(24.dp)
-                            )
-                        }
+                        Icon(
+                            imageVector = Icons.Default.Wifi,
+                            contentDescription = null,
+                            tint = Color(0xFF38BDF8),
+                            modifier = Modifier.size(24.dp)
+                        )
                     }
+
                     Spacer(modifier = Modifier.width(14.dp))
+
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            text = if (isDiscovering) "Scanning Local Wi-Fi..." else "Discovery Ready",
-                            style = Typography.titleMedium,
-                            color = TextPrimary
+                            text = if (isDiscovering) "Scanning local Wi-Fi..." else "Wi-Fi Discovery Ready",
+                            style = Typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                            color = Color.White
                         )
-                        Spacer(modifier = Modifier.height(2.dp))
                         Text(
-                            text = if (isDiscovering) "Searching for _androidtvremote2._tcp services" else "${discoveredDevices.size} device(s) found",
-                            style = Typography.bodyMedium,
-                            color = TextSecondary
+                            text = "Make sure phone and Android TV are on the same network",
+                            style = Typography.bodySmall,
+                            color = Color(0xFF94A3B8)
                         )
                     }
                 }
             }
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Text(
+                text = "DISCOVERED DEVICES (${discoveredDevices.size})",
+                style = Typography.labelSmall.copy(fontWeight = FontWeight.Bold, letterSpacing = 1.sp),
+                color = Color(0xFF64748B)
+            )
 
+            // DEVICES LIST
             if (discoveredDevices.isEmpty()) {
                 Box(
                     modifier = Modifier
@@ -213,210 +178,168 @@ fun DevicesScreen(
                         .weight(1f),
                     contentAlignment = Alignment.Center
                 ) {
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        modifier = Modifier.padding(24.dp)
-                    ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Icon(
                             imageVector = Icons.Default.Tv,
                             contentDescription = null,
-                            tint = TextMuted,
+                            tint = Color(0xFF334155),
                             modifier = Modifier.size(64.dp)
                         )
-                        Spacer(modifier = Modifier.height(16.dp))
+                        Spacer(modifier = Modifier.height(12.dp))
                         Text(
-                            text = "No TVs Found Yet",
-                            style = Typography.titleMedium,
-                            color = TextPrimary
-                        )
-                        Spacer(modifier = Modifier.height(6.dp))
-                        Text(
-                            text = "Ensure your phone and Mi TV Stick or Android TV are connected to the same Wi-Fi network.",
+                            text = "Searching for Android TVs on network...",
                             style = Typography.bodyMedium,
-                            color = TextSecondary,
-                            textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                            color = Color(0xFF64748B)
                         )
-                        Spacer(modifier = Modifier.height(20.dp))
-                        GlassButton(
-                            text = if (isDiscovering) "Stop Scan" else "Start Scanning",
-                            isPrimary = true,
-                            onClick = if (isDiscovering) onStopScan else onStartScan,
-                            testTag = "btn_start_scan_empty"
-                        )
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Button(
+                            onClick = { showManualDialog = true },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1E293B)),
+                            border = BorderStroke(1.dp, Color(0xFF334155)),
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Text("Connect via IP Address", color = Color(0xFF38BDF8))
+                        }
                     }
                 }
             } else {
                 LazyColumn(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f)
-                        .testTag("device_list"),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                    modifier = Modifier.weight(1f)
                 ) {
-                    items(discoveredDevices, key = { it.id }) { device ->
-                        DiscoveredDeviceCard(
-                            device = device,
-                            onSelect = { onSelectDevice(device) }
-                        )
+                    items(discoveredDevices, key = { it.id }) { dev ->
+                        GlassCard(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(20.dp),
+                            onClick = { onSelectDevice(dev) }
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(16.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(48.dp)
+                                            .clip(CircleShape)
+                                            .background(Color(0xFF1E293B))
+                                            .border(1.dp, Color(0xFF38BDF8), CircleShape),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Tv,
+                                            contentDescription = null,
+                                            tint = Color(0xFF38BDF8),
+                                            modifier = Modifier.size(24.dp)
+                                        )
+                                    }
+
+                                    Spacer(modifier = Modifier.width(14.dp))
+
+                                    Column {
+                                        Text(
+                                            text = dev.name,
+                                            style = Typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                            color = Color.White
+                                        )
+                                        Text(
+                                            text = "${dev.host}:${dev.remotePort}",
+                                            style = Typography.bodySmall,
+                                            color = Color(0xFF94A3B8)
+                                        )
+                                    }
+                                }
+
+                                Button(
+                                    onClick = { onSelectDevice(dev) },
+                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0284C7)),
+                                    shape = RoundedCornerShape(12.dp),
+                                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
+                                ) {
+                                    Text("Connect", style = Typography.labelMedium.copy(fontWeight = FontWeight.Bold))
+                                }
+                            }
+                        }
                     }
                 }
             }
-
-            Spacer(modifier = Modifier.height(16.dp))
         }
-    }
 
-    if (showManualDialog) {
-        ManualDeviceDialog(
-            onDismiss = { showManualDialog = false },
-            onAdd = { name, ip ->
-                onAddManualDevice(name, ip)
-                showManualDialog = false
-            }
-        )
-    }
-}
+        // MANUAL IP DIALOG
+        if (showManualDialog) {
+            var tvName by remember { mutableStateOf("Android TV") }
+            var ipAddress by remember { mutableStateOf("") }
 
-@Composable
-fun DiscoveredDeviceCard(
-    device: TvDevice,
-    onSelect: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    GlassCard(
-        modifier = modifier
-            .fillMaxWidth()
-            .testTag("device_card_${device.id}")
-            .clickable(onClick = onSelect),
-        shape = RoundedCornerShape(18.dp),
-        backgroundColor = GlassSurface
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(46.dp)
-                    .clip(RoundedCornerShape(14.dp))
-                    .background(
-                        Brush.linearGradient(
-                            listOf(ElectricBluePrimary, ElectricBlueDark)
+            AlertDialog(
+                onDismissRequest = { showManualDialog = false },
+                containerColor = Color(0xFF0F172A),
+                shape = RoundedCornerShape(24.dp),
+                title = {
+                    Text("Manual IP Connection", style = Typography.titleMedium.copy(fontWeight = FontWeight.Bold), color = Color.White)
+                },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text(
+                            text = "Enter your Android TV IP address (check TV Settings > Network)",
+                            style = Typography.bodySmall,
+                            color = Color(0xFF94A3B8)
                         )
-                    ),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Tv,
-                    contentDescription = null,
-                    tint = Color.White,
-                    modifier = Modifier.size(24.dp)
-                )
-            }
-            Spacer(modifier = Modifier.width(14.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = device.name,
-                    style = Typography.titleMedium,
-                    color = TextPrimary
-                )
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = "${device.host} • TCP ${device.pairingPort}",
-                    style = Typography.bodyMedium,
-                    color = TextSecondary
-                )
-                Text(
-                    text = "${device.manufacturer} ${device.model}",
-                    style = Typography.labelSmall,
-                    color = TextMuted
-                )
-            }
-            Spacer(modifier = Modifier.width(8.dp))
-            GlassButton(
-                text = "Pair",
-                icon = Icons.Default.Link,
-                isPrimary = true,
-                onClick = onSelect,
-                testTag = "pair_button_${device.id}"
+
+                        OutlinedTextField(
+                            value = tvName,
+                            onValueChange = { tvName = it },
+                            label = { Text("TV Name", color = Color(0xFF94A3B8)) },
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedTextColor = Color.White,
+                                unfocusedTextColor = Color.White,
+                                focusedBorderColor = Color(0xFF38BDF8),
+                                unfocusedBorderColor = Color(0xFF334155)
+                            ),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        )
+
+                        OutlinedTextField(
+                            value = ipAddress,
+                            onValueChange = { ipAddress = it },
+                            label = { Text("IP Address (e.g. 192.168.1.100)", color = Color(0xFF94A3B8)) },
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedTextColor = Color.White,
+                                unfocusedTextColor = Color.White,
+                                focusedBorderColor = Color(0xFF38BDF8),
+                                unfocusedBorderColor = Color(0xFF334155)
+                            ),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            if (ipAddress.isNotEmpty()) {
+                                onAddManualDevice(tvName, ipAddress)
+                                showManualDialog = false
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0284C7)),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Text("Connect")
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showManualDialog = false }) {
+                        Text("Cancel", color = Color(0xFF94A3B8))
+                    }
+                }
             )
         }
     }
-}
-
-@Composable
-fun ManualDeviceDialog(
-    onDismiss: () -> Unit,
-    onAdd: (String, String) -> Unit
-) {
-    var deviceName by remember { mutableStateOf("") }
-    var ipAddress by remember { mutableStateOf("") }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        containerColor = SurfaceCardLight,
-        title = {
-            Text(text = "Add Device Manually", style = Typography.titleLarge, color = TextPrimary)
-        },
-        text = {
-            Column(modifier = Modifier.fillMaxWidth()) {
-                Text(
-                    text = "Enter the local IP address of your Android TV / Mi Stick.",
-                    style = Typography.bodyMedium,
-                    color = TextSecondary
-                )
-                Spacer(modifier = Modifier.height(12.dp))
-                OutlinedTextField(
-                    value = deviceName,
-                    onValueChange = { deviceName = it },
-                    label = { Text("Device Name (e.g. Mi Stick)") },
-                    singleLine = true,
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedTextColor = TextPrimary,
-                        unfocusedTextColor = TextPrimary,
-                        focusedBorderColor = ElectricBluePrimary,
-                        unfocusedBorderColor = GlassBorderStrong
-                    ),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("input_device_name")
-                )
-                Spacer(modifier = Modifier.height(8.dp))
-                OutlinedTextField(
-                    value = ipAddress,
-                    onValueChange = { ipAddress = it },
-                    label = { Text("IP Address (e.g. 192.168.1.100)") },
-                    singleLine = true,
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedTextColor = TextPrimary,
-                        unfocusedTextColor = TextPrimary,
-                        focusedBorderColor = ElectricBluePrimary,
-                        unfocusedBorderColor = GlassBorderStrong
-                    ),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("input_device_ip")
-                )
-            }
-        },
-        confirmButton = {
-            TextButton(
-                onClick = {
-                    if (ipAddress.isNotBlank()) {
-                        onAdd(deviceName, ipAddress)
-                    }
-                },
-                modifier = Modifier.testTag("btn_confirm_add_device")
-            ) {
-                Text("Add", color = ElectricBluePrimary)
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("Cancel", color = TextSecondary)
-            }
-        }
-    )
 }

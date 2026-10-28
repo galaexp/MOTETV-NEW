@@ -3,6 +3,6 @@
     <item
         android:width="66dp"
         android:height="66dp"
-        android:drawable="@drawable/motetv_launcher_fg"
+        android:drawable="@drawable/ic_motetv_foreground"
         android:gravity="center" />
 </layer-list>

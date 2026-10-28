@@ -2,6 +2,7 @@ package com.gala.motetv.ui.components
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.ui.graphics.Color
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -98,29 +99,30 @@ fun PinEntryDialog(
             dismissOnClickOutside = false,
             usePlatformDefaultWidth = true
         ),
-        containerColor = SurfaceCardLight,
-        shape = RoundedCornerShape(24.dp),
+        containerColor = Color(0xFF0F172A),
+        shape = RoundedCornerShape(26.dp),
         title = {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(
                     modifier = Modifier
-                        .size(36.dp)
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(ElectricBluePrimary.copy(alpha = 0.2f)),
+                        .size(40.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(Color(0xFF0284C7).copy(alpha = 0.2f))
+                        .border(1.dp, Color(0xFF38BDF8), RoundedCornerShape(12.dp)),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
                         imageVector = Icons.Default.Lock,
                         contentDescription = null,
-                        tint = ElectricBluePrimary,
-                        modifier = Modifier.size(20.dp)
+                        tint = Color(0xFF38BDF8),
+                        modifier = Modifier.size(22.dp)
                     )
                 }
                 Spacer(modifier = Modifier.size(12.dp))
                 Text(
                     text = "Pair with $tvName",
-                    style = Typography.titleLarge,
-                    color = TextPrimary
+                    style = Typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                    color = Color.White
                 )
             }
         },
@@ -133,8 +135,8 @@ fun PinEntryDialog(
             ) {
                 Text(
                     text = prompt,
-                    style = Typography.bodyMedium,
-                    color = TextSecondary,
+                    style = Typography.bodySmall,
+                    color = Color(0xFF94A3B8),
                     textAlign = TextAlign.Center
                 )
 

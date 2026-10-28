@@ -3,53 +3,34 @@ package com.gala.motetv.ui.screens
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Launch
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.Tv
 import androidx.compose.material.icons.outlined.StarBorder
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedTextFieldDefaults
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.material3.ripple
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -62,22 +43,9 @@ import com.gala.motetv.launcher.AppDefinition
 import com.gala.motetv.launcher.AppLauncher
 import com.gala.motetv.launcher.LaunchResult
 import com.gala.motetv.remote.TvRemoteManager
-import com.gala.motetv.ui.components.GlassButton
 import com.gala.motetv.ui.components.GlassCard
-import com.gala.motetv.ui.components.TvStatusCard
-import com.gala.motetv.ui.theme.BackgroundLight
-import com.gala.motetv.ui.theme.ElectricBluePrimary
-import com.gala.motetv.ui.theme.GlassBorder
-import com.gala.motetv.ui.theme.GlassSurface
-import com.gala.motetv.ui.theme.GlassSurfaceElevated
-import com.gala.motetv.ui.theme.StatusErrorRed
-import com.gala.motetv.ui.theme.StatusSuccessGreen
-import com.gala.motetv.ui.theme.StatusWarningAmber
-import com.gala.motetv.ui.theme.SurfaceCardLight
-import com.gala.motetv.ui.theme.TextMuted
-import com.gala.motetv.ui.theme.TextPrimary
-import com.gala.motetv.ui.theme.TextSecondary
-import com.gala.motetv.ui.theme.Typography
+import com.gala.motetv.ui.theme.*
+import kotlinx.coroutines.launch
 
 @Composable
 fun AppsScreen(
@@ -93,306 +61,264 @@ fun AppsScreen(
     onReconnect: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val coroutineScope = rememberCoroutineScope()
     var showAddDialog by remember { mutableStateOf(false) }
-    var selectedAppForStrategy by remember { mutableStateOf<AppDefinition?>(null) }
-    var lastLaunchFeedback by remember { mutableStateOf<LaunchResult?>(null) }
+    var selectedCategory by remember { mutableStateOf("ALL") }
+    var launchFeedback by remember { mutableStateOf<String?>(null) }
+    val isConnected = connectionState is ConnectionState.Ready
 
-    Scaffold(
-        modifier = modifier.fillMaxSize(),
-        containerColor = BackgroundLight,
-        topBar = {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .statusBarsPadding()
-                    .padding(horizontal = 16.dp, vertical = 8.dp)
-            ) {
-                TvStatusCard(
-                    device = device,
-                    connectionState = connectionState,
-                    onOpenDevices = onOpenDevices,
-                    onReconnect = onReconnect,
-                    onPowerClick = {}
-                )
-            }
+    val filteredApps = remember(allApps, favoriteAppIds, selectedCategory) {
+        when (selectedCategory) {
+            "FAVORITES" -> allApps.filter { favoriteAppIds.contains(it.id) }
+            "STREAMING" -> allApps.filter { it.category == AppCategory.STREAMING }
+            "VIDEO" -> allApps.filter { it.category == AppCategory.VIDEO }
+            "MUSIC" -> allApps.filter { it.category == AppCategory.MUSIC }
+            "CUSTOM" -> allApps.filter { it.isCustom }
+            else -> allApps
         }
-    ) { innerPadding ->
-        LazyColumn(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(innerPadding)
-                .padding(horizontal = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+    }
+
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .background(BackgroundDark)
+            .statusBarsPadding()
+            .padding(16.dp)
+    ) {
+        Column(
+            modifier = Modifier.fillMaxSize(),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            // Launch Feedback Banner
-            item {
-                AnimatedVisibility(
-                    visible = lastLaunchFeedback != null,
-                    enter = fadeIn(),
-                    exit = fadeOut()
-                ) {
-                    lastLaunchFeedback?.let { feedback ->
-                        GlassCard(
-                            modifier = Modifier.fillMaxWidth(),
-                            backgroundColor = when (feedback) {
-                                is LaunchResult.Success -> StatusSuccessGreen.copy(alpha = 0.15f)
-                                is LaunchResult.Failure -> StatusErrorRed.copy(alpha = 0.15f)
-                            },
-                            shape = RoundedCornerShape(16.dp)
-                        ) {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 14.dp, vertical = 10.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        text = when (feedback) {
-                                            is LaunchResult.Success -> "Launched ${feedback.appName}"
-                                            is LaunchResult.Failure -> "Failed to launch ${feedback.appName}"
-                                        },
-                                        style = Typography.titleSmall,
-                                        color = when (feedback) {
-                                            is LaunchResult.Success -> StatusSuccessGreen
-                                            is LaunchResult.Failure -> StatusErrorRed
-                                        }
-                                    )
-                                    Text(
-                                        text = when (feedback) {
-                                            is LaunchResult.Success -> "Using: ${feedback.uriUsed}"
-                                            is LaunchResult.Failure -> feedback.reason
-                                        },
-                                        style = Typography.bodySmall,
-                                        color = TextSecondary
-                                    )
-                                }
-                                IconButton(onClick = { lastLaunchFeedback = null }) {
-                                    Icon(
-                                        imageVector = Icons.Default.Close,
-                                        contentDescription = "Dismiss",
-                                        tint = TextSecondary,
-                                        modifier = Modifier.size(18.dp)
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Header with Add Button
-            item {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column {
-                        Text(
-                            text = "TV Applications",
-                            style = Typography.titleLarge,
-                            color = TextPrimary
-                        )
-                        Text(
-                            text = "Tap any app to launch on ${device?.name ?: "TV"}",
-                            style = Typography.bodySmall,
-                            color = TextSecondary
-                        )
-                    }
-
-                    GlassButton(
-                        text = "Add App",
-                        icon = Icons.Default.Add,
-                        onClick = { showAddDialog = true },
-                        testTag = "btn_add_app"
-                    )
-                }
-            }
-
-            // Favorites Section
-            val favoriteApps = allApps.filter { favoriteAppIds.contains(it.id) }
-            if (favoriteApps.isNotEmpty()) {
-                item {
+            // TOP BAR: Header & Add App Button
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column {
                     Text(
-                        text = "Favorite Apps",
-                        style = Typography.titleMedium,
-                        color = TextPrimary
+                        text = "Android TV Apps",
+                        style = Typography.headlineMedium.copy(fontWeight = FontWeight.Bold),
+                        color = Color.White
+                    )
+                    Text(
+                        text = if (isConnected) "Connected to ${device?.name}" else "Connect to TV to launch apps",
+                        style = Typography.bodySmall,
+                        color = if (isConnected) Color(0xFF10B981) else Color(0xFF94A3B8)
                     )
                 }
 
-                items(favoriteApps, key = { "fav_${it.id}" }) { app ->
-                    AppRowCard(
-                        app = app,
-                        isFavorite = true,
-                        onLaunch = {
-                            val result = AppLauncher.launch(app, remoteManager)
-                            lastLaunchFeedback = result
-                        },
-                        onToggleFavorite = { onToggleFavorite(app.id) },
-                        onShowStrategies = { selectedAppForStrategy = app },
-                        onDelete = if (app.isCustom) { { onRemoveCustomApp(app.id) } } else null
+                Button(
+                    onClick = { showAddDialog = true },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0284C7)),
+                    shape = RoundedCornerShape(14.dp),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
+                ) {
+                    Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Add App", style = Typography.labelMedium.copy(fontWeight = FontWeight.Bold))
+                }
+            }
+
+            // FILTER CATEGORIES ROW
+            val categories = listOf(
+                "ALL" to "All Apps",
+                "FAVORITES" to "Favorites ⭐",
+                "STREAMING" to "Streaming",
+                "VIDEO" to "Video",
+                "MUSIC" to "Music",
+                "CUSTOM" to "Custom"
+            )
+
+            LazyRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                items(categories) { (key, label) ->
+                    val isSel = selectedCategory == key
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(if (isSel) Color(0xFF0284C7) else Color(0xFF1E293B))
+                            .border(
+                                1.dp,
+                                if (isSel) Color(0xFF38BDF8) else Color(0xFF334155),
+                                RoundedCornerShape(16.dp)
+                            )
+                            .clickable { selectedCategory = key }
+                            .padding(horizontal = 14.dp, vertical = 8.dp)
+                    ) {
+                        Text(
+                            text = label,
+                            style = Typography.labelSmall.copy(fontWeight = if (isSel) FontWeight.Bold else FontWeight.Medium),
+                            color = if (isSel) Color.White else Color(0xFF94A3B8)
+                        )
+                    }
+                }
+            }
+
+            // LAUNCH FEEDBACK BANNER
+            AnimatedVisibility(
+                visible = launchFeedback != null,
+                enter = fadeIn(),
+                exit = fadeOut()
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = Color(0x330284C7),
+                    border = BorderStroke(1.dp, Color(0xFF38BDF8))
+                ) {
+                    Text(
+                        text = launchFeedback ?: "",
+                        style = Typography.bodySmall.copy(fontWeight = FontWeight.Medium),
+                        color = Color(0xFF38BDF8),
+                        modifier = Modifier.padding(12.dp)
                     )
                 }
             }
 
-            // All Configured Apps Section
-            item {
-                Spacer(modifier = Modifier.height(8.dp))
-                Text(
-                    text = "All Applications",
-                    style = Typography.titleMedium,
-                    color = TextPrimary
-                )
-            }
-
-            items(allApps, key = { "all_${it.id}" }) { app ->
-                AppRowCard(
-                    app = app,
-                    isFavorite = favoriteAppIds.contains(app.id),
-                    onLaunch = {
-                        val result = AppLauncher.launch(app, remoteManager)
-                        lastLaunchFeedback = result
-                    },
-                    onToggleFavorite = { onToggleFavorite(app.id) },
-                    onShowStrategies = { selectedAppForStrategy = app },
-                    onDelete = if (app.isCustom) { { onRemoveCustomApp(app.id) } } else null
-                )
-            }
-
-            item {
-                Spacer(modifier = Modifier.height(24.dp))
+            // APP LIST
+            if (filteredApps.isEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "No apps in this category",
+                        style = Typography.bodyMedium,
+                        color = Color(0xFF64748B)
+                    )
+                }
+            } else {
+                LazyColumn(
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    items(filteredApps, key = { it.id }) { app ->
+                        val isFav = favoriteAppIds.contains(app.id)
+                        AppItemCard(
+                            app = app,
+                            isFavorite = isFav,
+                            isConnected = isConnected,
+                            onLaunch = {
+                                coroutineScope.launch {
+                                    val result = AppLauncher.launch(app, remoteManager)
+                                    launchFeedback = "Launched ${app.name} on TV"
+                                    kotlinx.coroutines.delay(3000)
+                                    launchFeedback = null
+                                }
+                            },
+                            onToggleFavorite = { onToggleFavorite(app.id) },
+                            onDelete = if (app.isCustom) { { onRemoveCustomApp(app.id) } } else null
+                        )
+                    }
+                }
             }
         }
-    }
 
-    // Add Custom App Dialog
-    if (showAddDialog) {
-        AddCustomAppDialog(
-            onDismiss = { showAddDialog = false },
-            onAdd = { newApp ->
-                onAddCustomApp(newApp)
-                showAddDialog = false
-            }
-        )
-    }
-
-    // Launch Strategy Dialog (for testing YouTube deep-links vs package URI)
-    selectedAppForStrategy?.let { app ->
-        AppStrategyDialog(
-            app = app,
-            onDismiss = { selectedAppForStrategy = null },
-            onSelectStrategy = { index ->
-                val result = AppLauncher.launch(app, remoteManager, strategyIndex = index)
-                lastLaunchFeedback = result
-                selectedAppForStrategy = null
-            }
-        )
+        // ADD CUSTOM APP DIALOG
+        if (showAddDialog) {
+            AddCustomAppDialog(
+                onDismiss = { showAddDialog = false },
+                onAdd = { newApp ->
+                    onAddCustomApp(newApp)
+                    showAddDialog = false
+                }
+            )
+        }
     }
 }
 
 @Composable
-fun AppRowCard(
+private fun AppItemCard(
     app: AppDefinition,
     isFavorite: Boolean,
+    isConnected: Boolean,
     onLaunch: () -> Unit,
     onToggleFavorite: () -> Unit,
-    onShowStrategies: () -> Unit,
-    onDelete: (() -> Unit)? = null
+    onDelete: (() -> Unit)?
 ) {
-    val brandColor = Color(app.accentColorHex)
-
     GlassCard(
-        modifier = Modifier
-            .fillMaxWidth()
-            .testTag("app_card_${app.id}"),
+        modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(18.dp),
-        elevation = 2.dp,
-        onClick = onLaunch
+        elevation = 2.dp
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 12.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
+                .padding(14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
         ) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.weight(1f)
             ) {
+                // App Logo Placeholder Box
                 Box(
                     modifier = Modifier
-                        .size(44.dp)
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(brandColor.copy(alpha = 0.15f))
-                        .border(1.dp, brandColor.copy(alpha = 0.3f), RoundedCornerShape(12.dp)),
+                        .size(46.dp)
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(Color(0xFF1E293B))
+                        .border(1.dp, Color(0xFF334155), RoundedCornerShape(14.dp)),
                     contentAlignment = Alignment.Center
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .size(16.dp)
-                            .clip(CircleShape)
-                            .background(brandColor)
+                    Icon(
+                        imageVector = Icons.Default.Apps,
+                        contentDescription = null,
+                        tint = Color(0xFF38BDF8),
+                        modifier = Modifier.size(24.dp)
                     )
                 }
-                Spacer(modifier = Modifier.width(14.dp))
+
+                Spacer(modifier = Modifier.width(12.dp))
+
                 Column {
                     Text(
                         text = app.name,
-                        style = Typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
-                        color = TextPrimary
+                        style = Typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                        color = Color.White
                     )
                     Text(
-                        text = if (app.packageId.isNotBlank()) app.packageId else app.primaryDeepLink,
-                        style = Typography.bodySmall,
-                        color = TextSecondary,
-                        maxLines = 1
+                        text = app.category.name.lowercase().replaceFirstChar { it.uppercase() },
+                        style = Typography.labelSmall,
+                        color = Color(0xFF94A3B8)
                     )
                 }
             }
 
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                // Favorite Star
-                IconButton(
-                    onClick = onToggleFavorite,
-                    modifier = Modifier.size(36.dp)
-                ) {
+            // Actions: Star Favorite, Launch, Delete (if custom)
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                if (onDelete != null) {
+                    IconButton(onClick = onDelete, modifier = Modifier.size(36.dp)) {
+                        Icon(Icons.Default.Delete, contentDescription = "Delete", tint = Color(0xFFEF4444), modifier = Modifier.size(18.dp))
+                    }
+                }
+
+                IconButton(onClick = onToggleFavorite, modifier = Modifier.size(36.dp)) {
                     Icon(
                         imageVector = if (isFavorite) Icons.Default.Star else Icons.Outlined.StarBorder,
                         contentDescription = "Favorite",
-                        tint = if (isFavorite) StatusWarningAmber else TextMuted,
+                        tint = if (isFavorite) Color(0xFFF59E0B) else Color(0xFF64748B),
                         modifier = Modifier.size(20.dp)
                     )
                 }
 
-                // Strategy Picker / Launch Details
-                IconButton(
-                    onClick = onShowStrategies,
-                    modifier = Modifier.size(36.dp)
+                Button(
+                    onClick = onLaunch,
+                    enabled = isConnected,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color(0xFF0284C7),
+                        disabledContainerColor = Color(0xFF334155)
+                    ),
+                    shape = RoundedCornerShape(12.dp),
+                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.Launch,
-                        contentDescription = "Launch Options",
-                        tint = ElectricBluePrimary,
-                        modifier = Modifier.size(18.dp)
-                    )
-                }
-
-                // Delete if custom
-                if (onDelete != null) {
-                    IconButton(
-                        onClick = onDelete,
-                        modifier = Modifier.size(36.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Delete,
-                            contentDescription = "Delete",
-                            tint = StatusErrorRed,
-                            modifier = Modifier.size(18.dp)
-                        )
-                    }
+                    Icon(Icons.Default.Launch, contentDescription = null, modifier = Modifier.size(14.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("Open", style = Typography.labelSmall.copy(fontWeight = FontWeight.Bold))
                 }
             }
         }
@@ -400,176 +326,78 @@ fun AppRowCard(
 }
 
 @Composable
-fun AddCustomAppDialog(
+private fun AddCustomAppDialog(
     onDismiss: () -> Unit,
     onAdd: (AppDefinition) -> Unit
 ) {
-    var name by remember { mutableStateOf("") }
-    var packageId by remember { mutableStateOf("") }
-    var deepLink by remember { mutableStateOf("") }
+    var appName by remember { mutableStateOf("") }
+    var packageName by remember { mutableStateOf("") }
+    var deepLinkUrl by remember { mutableStateOf("") }
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        containerColor = SurfaceCardLight,
+        containerColor = Color(0xFF0F172A),
         shape = RoundedCornerShape(24.dp),
         title = {
-            Text(
-                text = "Add Custom App",
-                style = Typography.titleLarge,
-                color = TextPrimary
-            )
+            Text("Add Custom TV App", style = Typography.titleMedium.copy(fontWeight = FontWeight.Bold), color = Color.White)
         },
         text = {
-            Column(
-                modifier = Modifier.fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                Text(
-                    text = "Configure an app shortcut to launch on your TV via Android TV Remote v2 protocol.",
-                    style = Typography.bodySmall,
-                    color = TextSecondary
-                )
-
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 OutlinedTextField(
-                    value = name,
-                    onValueChange = { name = it },
-                    label = { Text("App Name (e.g. VLC)") },
-                    shape = RoundedCornerShape(14.dp),
+                    value = appName,
+                    onValueChange = { appName = it },
+                    label = { Text("App Name", color = Color(0xFF94A3B8)) },
+                    singleLine = true,
                     colors = OutlinedTextFieldDefaults.colors(
-                        focusedTextColor = TextPrimary,
-                        unfocusedTextColor = TextPrimary,
-                        focusedBorderColor = ElectricBluePrimary,
-                        unfocusedBorderColor = GlassBorder,
-                        focusedContainerColor = Color.White,
-                        unfocusedContainerColor = Color.White
+                        focusedTextColor = Color.White,
+                        unfocusedTextColor = Color.White,
+                        focusedBorderColor = Color(0xFF38BDF8),
+                        unfocusedBorderColor = Color(0xFF334155)
                     ),
+                    shape = RoundedCornerShape(12.dp),
                     modifier = Modifier.fillMaxWidth()
                 )
 
                 OutlinedTextField(
-                    value = packageId,
-                    onValueChange = { packageId = it },
-                    label = { Text("Package ID (e.g. org.videolan.vlc)") },
-                    shape = RoundedCornerShape(14.dp),
+                    value = deepLinkUrl,
+                    onValueChange = { deepLinkUrl = it },
+                    label = { Text("Deep Link / Web URL (e.g. https://...)", color = Color(0xFF94A3B8)) },
+                    singleLine = true,
                     colors = OutlinedTextFieldDefaults.colors(
-                        focusedTextColor = TextPrimary,
-                        unfocusedTextColor = TextPrimary,
-                        focusedBorderColor = ElectricBluePrimary,
-                        unfocusedBorderColor = GlassBorder,
-                        focusedContainerColor = Color.White,
-                        unfocusedContainerColor = Color.White
+                        focusedTextColor = Color.White,
+                        unfocusedTextColor = Color.White,
+                        focusedBorderColor = Color(0xFF38BDF8),
+                        unfocusedBorderColor = Color(0xFF334155)
                     ),
-                    modifier = Modifier.fillMaxWidth()
-                )
-
-                OutlinedTextField(
-                    value = deepLink,
-                    onValueChange = { deepLink = it },
-                    label = { Text("Deep Link (Optional, e.g. vlc://)") },
-                    shape = RoundedCornerShape(14.dp),
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedTextColor = TextPrimary,
-                        unfocusedTextColor = TextPrimary,
-                        focusedBorderColor = ElectricBluePrimary,
-                        unfocusedBorderColor = GlassBorder,
-                        focusedContainerColor = Color.White,
-                        unfocusedContainerColor = Color.White
-                    ),
+                    shape = RoundedCornerShape(12.dp),
                     modifier = Modifier.fillMaxWidth()
                 )
             }
         },
         confirmButton = {
-            GlassButton(
-                text = "Save App",
-                isPrimary = true,
-                enabled = name.isNotBlank() && (packageId.isNotBlank() || deepLink.isNotBlank()),
+            Button(
                 onClick = {
-                    val id = name.lowercase().replace(" ", "_").filter { it.isLetterOrDigit() || it == '_' }
-                    onAdd(
-                        AppDefinition(
-                            id = id,
-                            name = name.trim(),
-                            packageId = packageId.trim(),
-                            primaryDeepLink = if (deepLink.isNotBlank()) deepLink.trim() else "market://launch?id=${packageId.trim()}",
-                            accentColorHex = 0xFF5B6CFF,
-                            isFavorite = true,
+                    if (appName.isNotEmpty()) {
+                        val newApp = AppDefinition(
+                            id = "custom_${System.currentTimeMillis()}",
+                            name = appName,
+                            packageId = if (deepLinkUrl.startsWith("package:")) deepLinkUrl.removePrefix("package:") else "",
+                            primaryDeepLink = deepLinkUrl,
                             category = AppCategory.CUSTOM,
                             isCustom = true
                         )
-                    )
-                }
-            )
+                        onAdd(newApp)
+                    }
+                },
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0284C7)),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Text("Add App")
+            }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) {
-                Text("Cancel", color = TextMuted)
-            }
-        }
-    )
-}
-
-@Composable
-fun AppStrategyDialog(
-    app: AppDefinition,
-    onDismiss: () -> Unit,
-    onSelectStrategy: (Int) -> Unit
-) {
-    val strategies = AppLauncher.getStrategyDescriptions(app)
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        containerColor = SurfaceCardLight,
-        shape = RoundedCornerShape(24.dp),
-        title = {
-            Text(
-                text = "Launch ${app.name}",
-                style = Typography.titleLarge,
-                color = TextPrimary
-            )
-        },
-        text = {
-            Column(
-                modifier = Modifier.fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Text(
-                    text = "Select launch strategy to send to TV over Android TV Remote v2 protocol:",
-                    style = Typography.bodySmall,
-                    color = TextSecondary
-                )
-
-                strategies.forEachIndexed { index, desc ->
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(GlassSurface)
-                            .border(1.dp, GlassBorder, RoundedCornerShape(12.dp))
-                            .clickable { onSelectStrategy(index) }
-                            .padding(12.dp)
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                imageVector = Icons.Default.PlayArrow,
-                                contentDescription = null,
-                                tint = ElectricBluePrimary,
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = desc,
-                                style = Typography.bodySmall.copy(fontSize = 12.sp),
-                                color = TextPrimary
-                            )
-                        }
-                    }
-                }
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = onDismiss) {
-                Text("Close", color = TextMuted)
+                Text("Cancel", color = Color(0xFF94A3B8))
             }
         }
     )
