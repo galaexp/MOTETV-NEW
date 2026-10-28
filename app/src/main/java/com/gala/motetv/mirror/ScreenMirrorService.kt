@@ -201,6 +201,7 @@ class ScreenMirrorService : Service() {
             val height = (720f * aspectRatio).toInt().coerceAtLeast(480)
             val density = metrics.densityDpi
 
+            isMirroringActive.set(true)
             createCapturePipeline(width, height, density)
 
             _isMirroring.value = true
@@ -214,109 +215,126 @@ class ScreenMirrorService : Service() {
         }
     }
 
+    private val pipelineLock = Any()
+    private val isMirroringActive = AtomicBoolean(false)
+
     private fun createCapturePipeline(width: Int, height: Int, density: Int) {
-        imageReader?.close()
-        imageReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 3).apply {
-            setOnImageAvailableListener({ reader ->
-                val image = try {
-                    reader.acquireLatestImage()
-                } catch (e: Exception) {
-                    null
-                } ?: return@setOnImageAvailableListener
+        synchronized(pipelineLock) {
+            val proj = mediaProjection ?: return
+            val oldReader = imageReader
 
-                // Battery & CPU optimization: Skip compression entirely when no TV or client is viewing
-                val viewers = mirrorServer?.connectedClientsCount?.get() ?: 0
-                _activeViewers.value = viewers
-                if (viewers <= 0) {
-                    image.close()
-                    return@setOnImageAvailableListener
-                }
-
-                // Framerate throttle
-                val now = System.currentTimeMillis()
-                val minIntervalMs = 1000L / targetFps.coerceIn(5, 60)
-                if (now - lastFrameTimestamp < minIntervalMs) {
-                    image.close()
-                    return@setOnImageAvailableListener
-                }
-
-                // Discard frame if previous compression is still in progress (bounded work queue)
-                if (!isCompressing.compareAndSet(false, true)) {
-                    image.close()
-                    return@setOnImageAvailableListener
-                }
-
-                serviceScope.launch {
-                    try {
-                        lastFrameTimestamp = System.currentTimeMillis()
-                        val planes = image.planes
-                        val buffer = planes[0].buffer
-                        val pixelStride = planes[0].pixelStride
-                        val rowStride = planes[0].rowStride
-                        val rowPadding = rowStride - pixelStride * width
-
-                        val bufferWidth = width + rowPadding / pixelStride
-
-                        // Reuse cached bitmap if dimensions match
-                        var bmp = cachedBitmap
-                        if (bmp == null || bmp.width != bufferWidth || bmp.height != height) {
-                            bmp?.recycle()
-                            bmp = Bitmap.createBitmap(bufferWidth, height, Bitmap.Config.ARGB_8888)
-                            cachedBitmap = bmp
-                        }
-
-                        bmp.copyPixelsFromBuffer(buffer)
-                        image.close() // Close image immediately after copying pixels
-
-                        val finalBitmap = if (rowPadding > 0) {
-                            var cropped = cachedCroppedBitmap
-                            if (cropped == null || cropped.width != width || cropped.height != height) {
-                                cropped?.recycle()
-                                cropped = Bitmap.createBitmap(bmp, 0, 0, width, height)
-                                cachedCroppedBitmap = cropped
-                            } else {
-                                val canvas = android.graphics.Canvas(cropped)
-                                val srcRect = android.graphics.Rect(0, 0, width, height)
-                                val dstRect = android.graphics.Rect(0, 0, width, height)
-                                canvas.drawBitmap(bmp, srcRect, dstRect, null)
-                            }
-                            cropped
-                        } else {
-                            bmp
-                        }
-
-                        reusableOutputStream.reset()
-                        finalBitmap.compress(Bitmap.CompressFormat.JPEG, jpegQuality, reusableOutputStream)
-                        val jpegBytes = reusableOutputStream.toByteArray()
-                        mirrorServer?.onNewFrame(jpegBytes)
-
-                        frameCount++
-                        val currentTimestamp = System.currentTimeMillis()
-                        if (currentTimestamp - lastFpsTimestamp >= 1000) {
-                            _currentFps.value = frameCount
-                            frameCount = 0
-                            lastFpsTimestamp = currentTimestamp
-                        }
+            val newReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 3).apply {
+                setOnImageAvailableListener({ reader ->
+                    val image = try {
+                        reader.acquireLatestImage()
                     } catch (e: Exception) {
-                        TvLogger.e(TvLogger.TAG_GENERAL, "Frame processing error: ${e.message}")
-                    } finally {
-                        isCompressing.set(false)
-                    }
-                }
-            }, null)
-        }
+                        null
+                    } ?: return@setOnImageAvailableListener
 
-        virtualDisplay?.release()
-        virtualDisplay = mediaProjection?.createVirtualDisplay(
-            "MoteTvMirrorDisplay",
-            width,
-            height,
-            density,
-            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-            imageReader?.surface,
-            null,
-            mainHandler
-        )
+                    // Battery & CPU optimization: Skip compression entirely when no TV or client is viewing
+                    val viewers = mirrorServer?.connectedClientsCount?.get() ?: 0
+                    _activeViewers.value = viewers
+                    if (viewers <= 0) {
+                        image.close()
+                        return@setOnImageAvailableListener
+                    }
+
+                    // Framerate throttle
+                    val now = System.currentTimeMillis()
+                    val minIntervalMs = 1000L / targetFps.coerceIn(5, 60)
+                    if (now - lastFrameTimestamp < minIntervalMs) {
+                        image.close()
+                        return@setOnImageAvailableListener
+                    }
+
+                    // Discard frame if previous compression is still in progress (bounded work queue)
+                    if (!isCompressing.compareAndSet(false, true)) {
+                        image.close()
+                        return@setOnImageAvailableListener
+                    }
+
+                    serviceScope.launch {
+                        try {
+                            lastFrameTimestamp = System.currentTimeMillis()
+                            val planes = image.planes
+                            val buffer = planes[0].buffer
+                            val pixelStride = planes[0].pixelStride
+                            val rowStride = planes[0].rowStride
+                            val rowPadding = rowStride - pixelStride * width
+
+                            val bufferWidth = width + rowPadding / pixelStride
+
+                            // Reuse cached bitmap if dimensions match
+                            var bmp = cachedBitmap
+                            if (bmp == null || bmp.isRecycled || bmp.width != bufferWidth || bmp.height != height) {
+                                bmp?.recycle()
+                                bmp = Bitmap.createBitmap(bufferWidth, height, Bitmap.Config.ARGB_8888)
+                                cachedBitmap = bmp
+                            }
+
+                            bmp.copyPixelsFromBuffer(buffer)
+                            image.close() // Close image immediately after copying pixels
+
+                            val finalBitmap = if (rowPadding > 0) {
+                                var cropped = cachedCroppedBitmap
+                                if (cropped == null || cropped.isRecycled || cropped.width != width || cropped.height != height) {
+                                    cropped?.recycle()
+                                    cropped = Bitmap.createBitmap(bmp, 0, 0, width, height)
+                                    cachedCroppedBitmap = cropped
+                                } else {
+                                    val canvas = android.graphics.Canvas(cropped)
+                                    val srcRect = android.graphics.Rect(0, 0, width, height)
+                                    val dstRect = android.graphics.Rect(0, 0, width, height)
+                                    canvas.drawBitmap(bmp, srcRect, dstRect, null)
+                                }
+                                cropped
+                            } else {
+                                bmp
+                            }
+
+                            reusableOutputStream.reset()
+                            finalBitmap.compress(Bitmap.CompressFormat.JPEG, jpegQuality, reusableOutputStream)
+                            val jpegBytes = reusableOutputStream.toByteArray()
+                            mirrorServer?.onNewFrame(jpegBytes)
+
+                            frameCount++
+                            val currentTimestamp = System.currentTimeMillis()
+                            if (currentTimestamp - lastFpsTimestamp >= 1000) {
+                                _currentFps.value = frameCount
+                                frameCount = 0
+                                lastFpsTimestamp = currentTimestamp
+                            }
+                        } catch (e: Exception) {
+                            TvLogger.e(TvLogger.TAG_GENERAL, "Frame processing error: ${e.message}")
+                        } finally {
+                            isCompressing.set(false)
+                        }
+                    }
+                }, null)
+            }
+
+            imageReader = newReader
+
+            if (virtualDisplay == null) {
+                virtualDisplay = proj.createVirtualDisplay(
+                    "MoteTvMirrorDisplay",
+                    width,
+                    height,
+                    density,
+                    DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                    newReader.surface,
+                    null,
+                    mainHandler
+                )
+            } else {
+                virtualDisplay?.resize(width, height, density)
+                virtualDisplay?.setSurface(newReader.surface)
+            }
+
+            try {
+                oldReader?.close()
+            } catch (_: Exception) {}
+        }
     }
 
     private fun setupDisplayListener() {
@@ -324,7 +342,7 @@ class ScreenMirrorService : Service() {
             override fun onDisplayAdded(displayId: Int) {}
             override fun onDisplayRemoved(displayId: Int) {}
             override fun onDisplayChanged(displayId: Int) {
-                if (!_isMirroring.value || mediaProjection == null) return
+                if (!isMirroringActive.get() || mediaProjection == null) return
                 // Handle device rotation or display resize
                 val metrics = resources.displayMetrics
                 val width = 720
@@ -340,6 +358,7 @@ class ScreenMirrorService : Service() {
     }
 
     private fun stopMirroring() {
+        if (!isMirroringActive.getAndSet(false)) return
         _isMirroring.value = false
         _streamUrl.value = ""
         _webUrl.value = ""
@@ -347,33 +366,37 @@ class ScreenMirrorService : Service() {
         _activeViewers.value = 0
         _statusMessage.value = "Stopped"
 
-        try {
-            mediaProjection?.unregisterCallback(projectionCallback)
-        } catch (_: Exception) {}
+        synchronized(pipelineLock) {
+            try {
+                mediaProjection?.unregisterCallback(projectionCallback)
+            } catch (_: Exception) {}
 
-        try {
-            virtualDisplay?.release()
-        } catch (_: Exception) {}
-        virtualDisplay = null
+            try {
+                virtualDisplay?.release()
+            } catch (_: Exception) {}
+            virtualDisplay = null
 
-        try {
-            imageReader?.close()
-        } catch (_: Exception) {}
-        imageReader = null
+            try {
+                imageReader?.close()
+            } catch (_: Exception) {}
+            imageReader = null
 
-        try {
-            mediaProjection?.stop()
-        } catch (_: Exception) {}
-        mediaProjection = null
+            try {
+                mediaProjection?.stop()
+            } catch (_: Exception) {}
+            mediaProjection = null
 
-        mirrorServer?.stop()
-        mirrorServer = null
+            try {
+                mirrorServer?.stop()
+            } catch (_: Exception) {}
+            mirrorServer = null
 
-        cachedBitmap?.recycle()
-        cachedBitmap = null
-        cachedCroppedBitmap?.recycle()
-        cachedCroppedBitmap = null
-        reusableOutputStream.reset()
+            cachedBitmap?.recycle()
+            cachedBitmap = null
+            cachedCroppedBitmap?.recycle()
+            cachedCroppedBitmap = null
+            reusableOutputStream.reset()
+        }
 
         TvLogger.i(TvLogger.TAG_GENERAL, "Screen Mirroring resources released cleanly")
     }

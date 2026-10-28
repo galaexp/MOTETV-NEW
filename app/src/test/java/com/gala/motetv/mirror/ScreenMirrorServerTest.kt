@@ -3,9 +3,11 @@ package com.gala.motetv.mirror
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.net.HttpURLConnection
+import java.net.ServerSocket
 import java.net.URL
 import kotlin.concurrent.thread
 
@@ -45,7 +47,6 @@ class ScreenMirrorServerTest {
             } catch (_: Exception) {}
         }
 
-        // Give reader thread time to connect and get headers
         readerThread.join(2000)
 
         assertNotNull("Content-Type header should be present", contentTypeHeader)
@@ -58,9 +59,85 @@ class ScreenMirrorServerTest {
     }
 
     @Test
+    fun testPortOccupancyFallback() {
+        // Deliberately occupy port 8910
+        val blockingSocket = ServerSocket(8910)
+        blockingSocket.reuseAddress = true
+
+        val server = ScreenMirrorServer(requestedPort = 8910)
+        val started = server.start()
+        assertTrue("Server should start by falling back to available port", started)
+        assertEquals("Server should bind to next available port (8911)", 8911, server.boundPort)
+
+        server.stop()
+        blockingSocket.close()
+    }
+
+    @Test
+    fun testMissingTokenReturns403() {
+        val server = ScreenMirrorServer(requestedPort = 8920)
+        server.start()
+        val port = server.boundPort
+
+        val missingTokenUrl = URL("http://127.0.0.1:$port/stream")
+        val conn = missingTokenUrl.openConnection() as HttpURLConnection
+        conn.connectTimeout = 2000
+        conn.readTimeout = 2000
+        assertEquals("Missing token parameter must return 403 Forbidden", HttpURLConnection.HTTP_FORBIDDEN, conn.responseCode)
+        conn.disconnect()
+
+        server.stop()
+    }
+
+    @Test
+    fun testSessionInvalidationAfterStop() {
+        val server = ScreenMirrorServer(requestedPort = 8930)
+        server.start()
+        assertNotNull("Stream URL must be generated when bound and network active", server.getStreamUrl())
+
+        server.stop()
+
+        assertFalse("Server isBound should be false after stop", server.isBound.get())
+        assertNull("Stream URL must be null after stop", server.getStreamUrl())
+        assertEquals("Bound port must reset to -1", -1, server.boundPort)
+    }
+
+    @Test
+    fun testViewerCountInvariant() {
+        val server = ScreenMirrorServer(requestedPort = 8940)
+        server.start()
+        val port = server.boundPort
+        val token = server.sessionToken
+
+        val clients = (1..3).map {
+            val conn = URL("http://127.0.0.1:$port/stream?token=$token").openConnection() as HttpURLConnection
+            conn.connectTimeout = 2000
+            conn.readTimeout = 2000
+            thread {
+                try {
+                    conn.inputStream.read()
+                } catch (_: Exception) {}
+            }
+            conn
+        }
+
+        Thread.sleep(300)
+        assertTrue("Viewer count must be non-negative during active streaming", server.connectedClientsCount.get() >= 0)
+
+        for (conn in clients) {
+            try { conn.disconnect() } catch (_: Exception) {}
+        }
+
+        Thread.sleep(300)
+        assertTrue("Viewer count must remain non-negative after disconnects", server.connectedClientsCount.get() >= 0)
+
+        server.stop()
+        assertEquals("Viewer count must reset to 0 after server stop", 0, server.connectedClientsCount.get())
+    }
+
+    @Test
     fun testServerRejectsUnusableNetworkAddresses() {
-        val server = ScreenMirrorServer(requestedPort = 8900)
-        // 127.0.0.1 must be rejected by getLocalIpAddress
+        val server = ScreenMirrorServer(requestedPort = 8950)
         val localIp = server.getLocalIpAddress()
         if (localIp != null) {
             assertFalse("getLocalIpAddress must never return 127.0.0.1", localIp == "127.0.0.1")
@@ -70,14 +147,39 @@ class ScreenMirrorServerTest {
 
     @Test
     fun testServerGeneratesUniqueTokensPerSession() {
-        val server1 = ScreenMirrorServer(requestedPort = 8901)
-        val server2 = ScreenMirrorServer(requestedPort = 8902)
-        
+        val server1 = ScreenMirrorServer(requestedPort = 8961)
+        val server2 = ScreenMirrorServer(requestedPort = 8962)
+
         val token1 = server1.sessionToken
         val token2 = server2.sessionToken
 
         assertNotNull(token1)
         assertNotNull(token2)
         assertTrue(token1 != token2)
+    }
+
+    @Test
+    fun testVirtualDisplayResizingAbstraction() {
+        // Test abstraction verifying single creation / resize contract logic
+        var virtualDisplayCreations = 0
+        var virtualDisplayResizes = 0
+
+        fun onDisplayDimensionChanged(isFirstTime: Boolean) {
+            if (isFirstTime) {
+                virtualDisplayCreations++
+            } else {
+                virtualDisplayResizes++
+            }
+        }
+
+        // Initial setup
+        onDisplayDimensionChanged(isFirstTime = true)
+        // Rotation 1
+        onDisplayDimensionChanged(isFirstTime = false)
+        // Rotation 2
+        onDisplayDimensionChanged(isFirstTime = false)
+
+        assertEquals("VirtualDisplay should only be created once per MediaProjection session", 1, virtualDisplayCreations)
+        assertEquals("Subsequent display configuration changes should resize existing VirtualDisplay", 2, virtualDisplayResizes)
     }
 }

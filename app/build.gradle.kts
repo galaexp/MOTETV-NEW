@@ -26,16 +26,33 @@ android {
     create("release") {
       val keystorePath = System.getenv("KEYSTORE_PATH") ?: "${rootDir}/my-upload-key.jks"
       val store = file(keystorePath)
+      val releaseSigningRequired = (System.getenv("RELEASE_SIGNING_REQUIRED") ?: "false").toBoolean() ||
+          (project.findProperty("releaseSigningRequired") as? String)?.toBoolean() == true
+      val allowDebugFallback = (System.getenv("ALLOW_DEBUG_RELEASE_SIGNING") ?: (!releaseSigningRequired).toString()).toBoolean() ||
+          (project.findProperty("allowDebugReleaseSigning") as? String)?.toBoolean() == true
+
       if (store.exists()) {
         storeFile = store
         storePassword = System.getenv("STORE_PASSWORD")
-        keyAlias = "upload"
+        keyAlias = System.getenv("KEY_ALIAS") ?: "upload"
         keyPassword = System.getenv("KEY_PASSWORD")
+      } else if (allowDebugFallback && !releaseSigningRequired) {
+        val debugStore = file("${rootDir}/debug.keystore")
+        if (debugStore.exists()) {
+          storeFile = debugStore
+          storePassword = "android"
+          keyAlias = "androiddebugkey"
+          keyPassword = "android"
+        } else {
+          throw InvalidUserDataException(
+            "Release signing failed: Neither production keystore '$keystorePath' nor fallback debug keystore '${debugStore.absolutePath}' exists."
+          )
+        }
       } else {
-        storeFile = file("${rootDir}/debug.keystore")
-        storePassword = "android"
-        keyAlias = "androiddebugkey"
-        keyPassword = "android"
+        throw InvalidUserDataException(
+          "Release signing failed: Production upload keystore '$keystorePath' was not found and RELEASE_SIGNING_REQUIRED is true. " +
+          "To perform production release builds, ensure KEYSTORE_PATH, STORE_PASSWORD, and KEY_PASSWORD environment variables are set."
+        )
       }
     }
     create("debugConfig") {

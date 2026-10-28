@@ -239,8 +239,11 @@ class ScreenMirrorServer(
     }
 
     private fun streamMjpeg(client: Socket, out: OutputStream) {
-        activeClients.add(client)
-        connectedClientsCount.incrementAndGet()
+        val isClientTracked = AtomicBoolean(false)
+        if (activeClients.addIfAbsent(client)) {
+            connectedClientsCount.incrementAndGet()
+            isClientTracked.set(true)
+        }
 
         try {
             // Correct multipart boundary formatting per RFC 2046:
@@ -280,8 +283,9 @@ class ScreenMirrorServer(
         } catch (e: Exception) {
             // Client closed connection or network error - handle cleanly
         } finally {
-            activeClients.remove(client)
-            connectedClientsCount.decrementAndGet()
+            if (activeClients.remove(client) && isClientTracked.compareAndSet(true, false)) {
+                connectedClientsCount.updateAndGet { count -> (count - 1).coerceAtLeast(0) }
+            }
             try { client.close() } catch (_: Exception) {}
         }
     }
@@ -294,16 +298,18 @@ class ScreenMirrorServer(
         if (!isRunning.getAndSet(false)) return
         isBound.set(false)
 
-        for (client in activeClients) {
+        val clientsToClose = activeClients.toList()
+        activeClients.clear()
+
+        for (client in clientsToClose) {
             try { client.close() } catch (_: Exception) {}
         }
-        activeClients.clear()
-        connectedClientsCount.set(0)
 
         try { serverSocket?.close() } catch (_: Exception) {}
         serverSocket = null
         latestFrameJpeg = null
         boundPort = -1
+        connectedClientsCount.set(0)
         TvLogger.i(TvLogger.TAG_GENERAL, "ScreenMirrorServer stopped and session token invalidated")
     }
 }
