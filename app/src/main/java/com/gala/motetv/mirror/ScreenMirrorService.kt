@@ -90,6 +90,12 @@ class ScreenMirrorService : Service() {
 
         private val _statusMessage = MutableStateFlow("Ready")
         val statusMessage: StateFlow<String> = _statusMessage.asStateFlow()
+
+        private val _encodingMs = MutableStateFlow(0L)
+        val encodingMs: StateFlow<Long> = _encodingMs.asStateFlow()
+
+        private val _droppedFrames = MutableStateFlow(0)
+        val droppedFrames: StateFlow<Int> = _droppedFrames.asStateFlow()
     }
 
     private val projectionCallback = object : MediaProjection.Callback() {
@@ -249,13 +255,15 @@ class ScreenMirrorService : Service() {
 
                     // Discard frame if previous compression is still in progress (bounded work queue)
                     if (!isCompressing.compareAndSet(false, true)) {
+                        _droppedFrames.value = _droppedFrames.value + 1
                         image.close()
                         return@setOnImageAvailableListener
                     }
 
                     serviceScope.launch {
+                        val frameStartMs = System.currentTimeMillis()
                         try {
-                            lastFrameTimestamp = System.currentTimeMillis()
+                            lastFrameTimestamp = frameStartMs
                             val planes = image.planes
                             val buffer = planes[0].buffer
                             val pixelStride = planes[0].pixelStride
@@ -296,6 +304,16 @@ class ScreenMirrorService : Service() {
                             finalBitmap.compress(Bitmap.CompressFormat.JPEG, jpegQuality, reusableOutputStream)
                             val jpegBytes = reusableOutputStream.toByteArray()
                             mirrorServer?.onNewFrame(jpegBytes)
+
+                            val duration = System.currentTimeMillis() - frameStartMs
+                            _encodingMs.value = duration
+
+                            // Adaptive Quality Check: if encoding takes too long (> 35ms), lower JPEG quality
+                            if (duration > 35 && jpegQuality > 40) {
+                                jpegQuality = (jpegQuality - 5).coerceAtLeast(30)
+                            } else if (duration < 18 && jpegQuality < 80 && frameCount % 30 == 0) {
+                                jpegQuality = (jpegQuality + 2).coerceAtMost(85)
+                            }
 
                             frameCount++
                             val currentTimestamp = System.currentTimeMillis()

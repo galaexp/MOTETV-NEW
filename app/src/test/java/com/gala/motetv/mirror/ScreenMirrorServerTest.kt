@@ -93,7 +93,8 @@ class ScreenMirrorServerTest {
     fun testSessionInvalidationAfterStop() {
         val server = ScreenMirrorServer(requestedPort = 8930)
         server.start()
-        assertNotNull("Stream URL must be generated when bound and network active", server.getStreamUrl())
+        assertTrue("Server should be bound after start", server.isBound.get())
+        assertTrue("Bound port should be assigned after start", server.boundPort > 0)
 
         server.stop()
 

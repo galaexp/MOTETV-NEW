@@ -1,0 +1,771 @@
+# MoteTV-NEW — Complete Stabilization, Feature Expansion & Production-Readiness Implementation
+
+## PROJECT CONTEXT
+
+Repository: `https://github.com/galaexp/MOTETV-NEW`
+
+Branch: `main`
+
+Application ID: `com.gala.motetv`
+
+Platform: Android phone app controlling Android TV devices and TV sticks, including Xiaomi Mi TV Stick.
+
+You are working on an existing, partially functional application. This is a continuation of the current project, NOT a fresh application.
+
+**Your task is to inspect the latest GitHub source, fix the remaining stability issues, and implement the new features described below directly in the existing project.** Modify the actual Kotlin source files, Compose screens, repositories, services, Gradle configuration, tests, and documentation as needed. Do not only produce a plan, mock-up, or list of suggestions.
+
+Do not ask me to implement individual steps manually. Complete as much of the implementation as the available environment supports, validate it, and push the changes to the existing repository when authorized GitHub access permits.
+
+## NON-NEGOTIABLE REQUIREMENTS
+
+1. Preserve all existing working Android TV pairing, TLS/authentication, protocol messages, remote controls, navigation, volume controls, guest mode, and saved credentials.
+2. Do not replace the existing Android TV Remote v2 protocol with a different protocol.
+3. Do not break existing media casting, local HTTP streaming, VLC integration, screen mirroring, token authentication, or browser playback.
+4. Do not redesign the app with oversized controls or excessive spacing. Maintain the existing compact, premium, light glassmorphic visual language.
+5. Reuse the existing architecture and dependencies where sensible. Avoid unnecessary dependencies, duplicate services, duplicated state, and repeated network or device-discovery operations.
+6. Keep all existing functionality available while introducing new features incrementally.
+7. Implement real functionality, not just decorative UI. Every new button, menu, profile, status indicator, and setting must have a working action.
+8. Never report a test, build, hardware test, or deployment as successful unless it was actually executed and verified.
+9. If GitHub write access is unavailable, provide the complete changes and precise commit instructions rather than claiming that changes were pushed.
+10. Inspect the current source before changing files. Do not blindly overwrite existing implementations with assumed versions.
+
+---
+
+# PHASE 1 — STABILIZATION AND CRITICAL FIXES
+
+Complete this phase before implementing optional enhancements.
+
+## 1.1 Fix MediaProjection and VirtualDisplay lifecycle
+
+Primary file: `app/src/main/java/com/gala/motetv/mirror/ScreenMirrorService.kt`
+
+Implement a reliable screen-capture lifecycle that complies with Android 14+ MediaProjection restrictions.
+
+Requirements:
+
+* Register `MediaProjection.Callback` before the first `createVirtualDisplay()` call.
+* Create exactly one `VirtualDisplay` per MediaProjection session.
+* On rotation or display metric changes, update the existing display with `VirtualDisplay.resize()` and `VirtualDisplay.setSurface()`.
+* Never create a second virtual display using the same projection session.
+* Create a correctly sized `ImageReader` for the new dimensions.
+* Replace the surface safely without leaving old readers or surfaces attached.
+* Close the old reader only after the existing display has been switched to the new surface.
+* Handle rapid rotation, duplicate display-change callbacks, and shutdown during resizing.
+* Keep all pipeline mutations protected by a consistent synchronization strategy.
+* Prevent callbacks from a replaced ImageReader from publishing stale frames.
+* Ensure all display listeners and projection callbacks are unregistered during teardown.
+* Ensure that a new session can start after the previous session stops or fails.
+
+Use an explicit lifecycle state, such as `IDLE`, `STARTING`, `ACTIVE`, and `STOPPING`, or an equally robust existing mechanism.
+
+Make start and stop operations idempotent. Do not let a Boolean flag cause resource cleanup to be skipped.
+
+## 1.2 Fix partial-startup cleanup
+
+Currently, the HTTP server may start before MediaProjection initialization completes.
+
+Implement cleanup so that if any step fails, all previously allocated resources are released.
+
+Clean up:
+
+* HTTP server and client sockets.
+* Session token and published stream URLs.
+* MediaProjection callback and projection.
+* VirtualDisplay.
+* ImageReader.
+* Display listener.
+* Cached bitmaps.
+* Reusable buffers.
+* Pending frame-processing work and related service resources.
+
+Test failures at each initialization stage. Verify that a failed start does not leave an active server, stale token, foreground notification, or unusable state.
+
+Repeated stop requests must not crash, decrement counters twice, or prevent a later successful start.
+
+## 1.3 Guarantee ImageReader frame cleanup
+
+For every acquired `Image`:
+
+* Close it in a `finally` block.
+* Close it safely if pixel copying or bitmap processing throws.
+* Reset the frame-processing busy flag in its own `finally` block.
+* Never queue an unbounded number of frames.
+* Drop incoming frames when compression is busy.
+* Prevent stale callbacks from touching recycled bitmaps.
+* Keep the image acquisition and bitmap ownership rules explicit.
+
+Reuse buffers only when their ownership and concurrent access are safe. Review `ByteArrayOutputStream.toByteArray()`, which still copies the encoded bytes. Do not claim zero allocations unless measured and demonstrated.
+
+## 1.4 Fix server lifecycle and viewer-count races
+
+Primary file: `app/src/main/java/com/gala/motetv/mirror/ScreenMirrorServer.kt`
+
+Requirements:
+
+* Each client connection must increment the viewer count at most once.
+* Each registered client must decrement it at most once.
+* Disconnect, socket failure, server shutdown, and repeated cleanup must not cause negative or inaccurate counts.
+* Server shutdown must invalidate the token immediately and close client sockets without blocking the main thread.
+* Do not reset the count independently of active client cleanup in a way that permits subsequent decrements to corrupt the count.
+* Prevent stale worker threads from publishing state after shutdown.
+* Make start/stop and port binding thread-safe.
+* Preserve port fallback behavior and return the actual bound port.
+* Reject loopback, link-local, and otherwise unusable LAN addresses when generating a URL for a TV.
+* Show a useful error when the phone has no suitable LAN address.
+
+Preserve authenticated streaming. Never log session tokens or complete tokenized URLs.
+
+## 1.5 Make release signing safe
+
+File: `app/build.gradle.kts`
+
+Correct the release signing configuration.
+
+* `ALLOW_DEBUG_RELEASE_SIGNING` must default to `false`.
+* A missing production keystore must never silently trigger debug signing.
+* Production release builds must require the intended keystore and valid credentials.
+* Validate `KEYSTORE_PATH`, `STORE_PASSWORD`, `KEY_ALIAS`, and `KEY_PASSWORD`.
+* Support an explicit local/test-only debug-signing opt-in when production signing is not required.
+* If `RELEASE_SIGNING_REQUIRED=true`, reject debug fallback regardless of other configuration.
+* Fail early with a clear actionable error.
+* Preserve ordinary debug builds.
+* Document how to inspect the signing certificate of an APK or AAB.
+* Never commit real keystores, passwords, tokens, or signing secrets.
+
+Test both the production-required and explicitly opted-in local/test scenarios.
+
+## 1.6 Preserve and improve casting security
+
+Review the existing media server and mirroring server.
+
+* Use short-lived, unpredictable session tokens.
+* Invalidate tokens on stop and failed startup.
+* Validate token authorization on every new stream/viewer request.
+* Do not expose tokens in application logs.
+* Restrict the service to intended local-network use.
+* Avoid unnecessarily exposing the streaming server beyond the local network.
+* Clearly explain that ordinary HTTP streaming on a trusted local network is not encrypted.
+* Never falsely claim that a stream is encrypted or inaccessible to other devices on the LAN.
+* Preserve compatibility with supported TV browsers and VLC.
+
+---
+
+# PHASE 2 — MULTI-TV DEVICE PROFILES
+
+Implement a proper device-profile system so the user can save and manage multiple TVs instead of repeatedly adding or pairing them.
+
+## 2.1 Device profile data model
+
+Create or extend a model such as `TvDeviceProfile` with fields appropriate to the existing architecture:
+
+* Stable local profile ID.
+* User-defined device name.
+* Device IP address, if configured.
+* Device/service identifier, if available.
+* Last-known host and port information where appropriate.
+* Connection method and last-known connection status.
+* Last-connected timestamp.
+* Favourite/default device flag.
+* Optional user-defined room or location label.
+* Capabilities discovered for that device, where supported.
+
+Do not store sensitive pairing secrets in an ordinary profile table unless the existing security model explicitly permits it. Reuse the existing credential persistence and secure storage mechanisms.
+
+Avoid storing redundant connection state that can be derived from the actual connection manager.
+
+## 2.2 Profile persistence and repository
+
+Implement a `TvDeviceRepository` or adapt the existing repository.
+
+* Use the existing local persistence approach, such as Room or DataStore, where appropriate.
+* Support add, rename, edit IP, set default, delete, and select profile.
+* Validate IP addresses and required fields.
+* Prevent accidental duplicate profiles for the same physical device.
+* Migrate existing saved TV information without losing credentials or breaking current users.
+* Keep profiles available offline.
+* Ensure profile changes are persisted across process restarts.
+
+## 2.3 Device selector UI
+
+Add a compact TV selector to the main screen or existing connection header.
+
+The selector should display:
+
+* Current TV name.
+* Connected/disconnected/reconnecting state.
+* Current IP when useful.
+* A menu for switching TVs.
+* An Add TV action.
+* Manage Devices.
+* Last-connected information where helpful.
+
+Implement a device-management screen with concise profile cards and clear actions.
+
+Support adding a TV by IP using the existing connection and pairing implementation. Do not invent a connection protocol.
+
+## 2.4 Switching and reconnecting
+
+When switching profiles:
+
+1. Prevent commands from being sent to the wrong TV.
+2. Disconnect or safely suspend the previous active connection as appropriate.
+3. Load the selected device configuration.
+4. Connect using the existing protocol implementation.
+5. Restore device-specific preferences and shortcuts.
+6. Show connection progress and actionable errors.
+7. Persist the successful connection and last-connected time.
+
+Implement bounded automatic reconnection with exponential backoff and a maximum retry interval. Stop retrying when the user disconnects, deletes the profile, switches devices, or disables automatic reconnect.
+
+Do not start multiple overlapping connection attempts.
+
+---
+
+# PHASE 3 — SMART REMOTE AND CONTEXT-AWARE SHORTCUTS
+
+Build on the existing D-pad, touchpad, browser mouse, keyboard drawer, media controls, and Skip Ad functionality.
+
+## 3.1 Improve remote navigation
+
+Keep the existing compact control layout.
+
+Implement or refine:
+
+* D-pad navigation with a central Select/OK action.
+* Back and Home.
+* Menu and app-switcher actions where supported.
+* Volume up/down and mute where supported.
+* Play/pause and seek controls where supported.
+* Long-press actions only when the protocol and UI support them reliably.
+* A visible connection state and command feedback for failed commands.
+* Prevention of duplicate commands caused by repeated taps or recomposition.
+
+Keep remote input responsive. Avoid unnecessary animations that delay button response.
+
+Do not display controls as available if the connected TV cannot support them.
+
+## 3.2 Remote favourites and custom shortcuts
+
+Create a configurable shortcut panel.
+
+Provide sensible default shortcuts where supported:
+
+* YouTube.
+* Netflix or other installed streaming apps when discoverable.
+* Home.
+* Back.
+* Recent apps where supported.
+* Settings where supported.
+* User-defined app-launch shortcuts.
+* Existing YouTube Skip Ad action.
+
+The user must be able to add, remove, reorder, and rename shortcuts.
+
+Persist shortcut configuration locally. Keep shortcuts associated with the correct device profile if TV-specific configuration is needed.
+
+Use actual discovered installed-app data when available. Do not invent package names, app availability, or successful launch status.
+
+## 3.3 Context-aware shortcuts
+
+Implement a simple, transparent rule engine rather than an AI feature that requires unnecessary cloud calls.
+
+Examples:
+
+* When YouTube is open, prioritise supported YouTube-related actions.
+* When a media app is active, show available playback controls.
+* When disconnected, prioritise Connect and Connection Diagnostics.
+* When mirroring is active, prioritise Stop Mirroring and Stream Status.
+* When a TV profile has no valid IP or connection details, prioritise Edit Device.
+
+Use the app's actual state and known capabilities. If the active TV application cannot be detected reliably, use the selected user mode or allow manual context selection.
+
+Do not claim to detect the active TV app when the protocol cannot provide that information.
+
+Context switching must not remove access to ordinary remote controls.
+
+## 3.4 Skip Ad
+
+Preserve the existing YouTube Skip Ad button.
+
+* Keep it visually distinct but compact.
+* Send only supported remote navigation/key events.
+* Allow configurable repeat count or timing only if needed and tested.
+* Include a Stop/Cancel option for any repeated action.
+* Prevent repeated taps from creating overlapping command loops.
+* Never claim guaranteed ad skipping. The action is a remote-control shortcut and may depend on YouTube's current interface and the displayed ad.
+
+---
+
+# PHASE 4 — CONNECTION DIAGNOSTICS AND RECOVERY
+
+Create a dedicated Connection Diagnostics screen accessible from the connection UI and Settings.
+
+## 4.1 Diagnostic checks
+
+Where technically possible, test and report:
+
+* Wi-Fi/network availability.
+* Selected TV profile and configured IP.
+* IP address format.
+* Reachability of the configured host.
+* Android TV Remote v2 pairing endpoint availability.
+* Remote endpoint reachability after pairing, using the existing protocol.
+* Current TLS/authentication state.
+* Credential availability without displaying secrets.
+* Pairing/connection timeout.
+* Last successful connection timestamp.
+* Reconnect attempt count.
+* Current connection error and suggested resolution.
+
+Use the correct existing endpoint information from the actual project. Do not assume that ICMP ping, arbitrary TCP checks, or a successful socket connection prove the TV is fully usable.
+
+Do not scan unrelated devices or perform broad network scans.
+
+## 4.2 Diagnostics UI
+
+Use a clear list with:
+
+* Check name.
+* Status: Passed, Failed, or Not Available.
+* Short explanation.
+* Suggested next action.
+
+Add:
+
+* Run Diagnostics.
+* Retry Connection.
+* Edit IP.
+* Re-pair Device when needed.
+* Copy Diagnostic Report.
+
+The copied report must redact credentials, pairing secrets, tokens, and other sensitive data.
+
+Keep diagnostics asynchronous. Never freeze the main thread while testing connectivity.
+
+## 4.3 Error handling
+
+Replace vague errors with actionable messages.
+
+Examples:
+
+* TV not reachable: check that the TV is powered on and both devices are on the same network.
+* Pairing required: start the existing pairing flow.
+* Authentication failed: retry pairing instead of looping forever.
+* Connection timeout: verify the IP address and network.
+* Remote service unavailable: explain that the TV may not support the expected protocol or may have its remote service disabled.
+
+Do not misclassify every connection failure as an authentication error.
+
+---
+
+# PHASE 5 — UNIFIED CASTING HUB
+
+Consolidate the existing media casting and screen mirroring into one coherent Media/Cast section without replacing working implementations.
+
+## 5.1 Casting hub structure
+
+Create a Media screen with clearly separated sections:
+
+1. Local media casting.
+2. Screen mirroring.
+3. Stream/player status.
+4. Recently selected media, where supported.
+5. Troubleshooting.
+
+Keep the existing navigation style and compact visual hierarchy.
+
+## 5.2 Local media casting
+
+Inspect and reuse the existing local media server and media-selection flow.
+
+Support existing media types where already implemented, and safely extend to:
+
+* Local video.
+* Local audio.
+* Supported image formats.
+* Subtitle files for video, where the selected player and delivery protocol support them.
+
+Implementation requirements:
+
+* Use Android's system file picker and appropriate content URI permissions.
+* Handle content URIs correctly.
+* Copy media to a temporary seekable file only when required by the server or player.
+* Avoid loading an entire large media file into memory.
+* Support HTTP byte-range requests correctly for seeking.
+* Correctly implement `206 Partial Content`, `Content-Range`, and `Content-Length` when required.
+* Handle unknown file sizes and invalid ranges.
+* Set suitable MIME types.
+* Clean up temporary files when safe.
+* Avoid deleting files that are still being streamed.
+* Handle permission revocation and unavailable files.
+* Do not assume that all TV browsers or media players support all formats.
+
+For subtitles, detect compatible subtitle files and provide a clear selection or pairing flow. Do not promise subtitle support when the target player cannot consume the selected format.
+
+## 5.3 TV player launching
+
+Preserve existing VLC and browser launch support.
+
+* Check whether the TV connection is ready.
+* Validate the stream URL before dispatch.
+* Launch through the existing TV remote manager.
+* Display “Launch command sent” separately from “Playback confirmed”.
+* Do not report playback as successful merely because a remote command was dispatched.
+* Provide a retry action when the TV does not open the stream.
+* Allow copying the local stream URL for troubleshooting without logging its authentication token.
+
+## 5.4 Screen mirroring
+
+Keep mirroring in the same hub but preserve its dedicated foreground service.
+
+The mirroring UI must show:
+
+* Idle, starting, active, stopping, and failed states.
+* Android screen-capture consent flow.
+* Current stream status.
+* Viewer count.
+* Measured frame rate.
+* Configured image quality.
+* Target resolution or capture dimensions.
+* Current stream URL when available.
+* Launch in TV browser and launch in VLC.
+* Stop Mirroring.
+
+Handle missing Wi-Fi IP, permission denial, capture revocation, rotation, server bind failure, and viewer disconnection.
+
+Do not start a second MediaProjection session automatically without obtaining fresh valid user consent where required.
+
+---
+
+# PHASE 6 — ADAPTIVE SCREEN MIRRORING
+
+Implement configurable mirroring quality and adaptive performance while maintaining predictable resource use.
+
+## 6.1 User settings
+
+Provide compact settings for:
+
+* Quality: Low, Balanced, High.
+* Frame-rate target.
+* Capture resolution.
+* JPEG quality.
+* Optional automatic quality adjustment.
+
+Use sensible defaults suitable for local Wi-Fi. Do not default to the maximum possible resolution or frame rate.
+
+Validate all numeric settings and clamp them to supported ranges.
+
+## 6.2 Adaptive algorithm
+
+Implement a bounded, deterministic algorithm based on actual observations.
+
+Possible signals:
+
+* Measured frame encoding time.
+* Actual frames delivered per second.
+* Dropped-frame count.
+* Number of active viewers.
+* Stream write failures or sustained slow-client behavior.
+* Current configured dimensions and JPEG quality.
+
+Do not use arbitrary invented bandwidth measurements. If actual throughput is unavailable, do not label an estimate as measured network bandwidth.
+
+Suggested behaviour:
+
+* When encoding time remains high or dropped frames persist, lower JPEG quality or capture resolution one step.
+* When performance remains healthy for a sustained interval, gradually restore quality.
+* Apply cooldowns and hysteresis to prevent settings from oscillating.
+* Keep the user's manual settings when automatic mode is disabled.
+* Avoid changing display metrics unnecessarily.
+* Avoid resizing the VirtualDisplay unless capture dimensions genuinely need to change.
+* Maintain the single-VirtualDisplay lifecycle rules from Phase 1.
+
+Expose current mode and any automatic quality changes in the UI.
+
+## 6.3 Streaming efficiency
+
+* Maintain bounded memory use.
+* Avoid blocking MediaProjection callbacks on slow socket writes.
+* Ensure one slow client cannot stall capture or all other clients.
+* Reuse buffers only with correct synchronization and ownership.
+* Measure performance before and after optimisations.
+* Add diagnostic counters for encoded frames, dropped frames, encoding time, and viewer failures.
+* Reset session counters when a new mirroring session starts.
+
+Do not promise a specific FPS or latency without measurements.
+
+---
+
+# PHASE 7 — KEYBOARD AND TEXT INPUT
+
+Improve the existing keyboard drawer and remote text-entry functionality.
+
+* Provide a compact text field and send/submit action.
+* Support spaces, punctuation, backspace, clear, and multiline editing where appropriate.
+* Show whether text submission is supported by the current connection.
+* Prevent duplicate sends caused by recomposition or repeated clicks.
+* Handle empty text and large input safely.
+* Dismiss the on-screen keyboard when appropriate.
+* Preserve normal remote controls when the keyboard drawer closes.
+* Add clipboard paste only where the existing TV protocol and Android APIs support it.
+
+Do not assume arbitrary clipboard synchronization is supported by Android TV Remote v2.
+
+If clipboard transfer is not supported, implement safe local paste into the app's text field, and explain the limitation. Never claim text reached the TV until the command was actually accepted by the available transport.
+
+---
+
+# PHASE 8 — SETTINGS AND USER EXPERIENCE
+
+Implement a cohesive Settings screen with these sections:
+
+### Devices
+
+* Manage TV profiles.
+* Default TV selection.
+* Automatic reconnect.
+* Connection diagnostics.
+
+### Remote
+
+* Favourite shortcuts.
+* Shortcut ordering.
+* Supported control preferences.
+* Skip Ad configuration, where useful.
+
+### Media and mirroring
+
+* Default player preference.
+* Mirroring quality.
+* Frame-rate target.
+* Automatic quality mode.
+* Temporary-file cleanup settings only if genuinely needed.
+
+### Appearance
+
+* Preserve the existing light glassmorphic design.
+* Add dark mode only if it can be integrated consistently without a broad, destabilising rewrite.
+* Use consistent spacing, typography, card radius, icon sizes, and interaction feedback.
+
+### About and troubleshooting
+
+* App version.
+* Diagnostic report.
+* Privacy/security information for local streaming.
+* Pairing and connection troubleshooting.
+
+Use persistent settings storage. Avoid duplicating settings in multiple unrelated ViewModels.
+
+Keep Settings accessible without hiding the main remote controls behind unnecessary navigation.
+
+---
+
+# PHASE 9 — ARCHITECTURE AND CODE QUALITY
+
+Inspect the actual project architecture first. Reuse existing managers, repositories, flows, and Compose navigation.
+
+Introduce clear boundaries where needed:
+
+* Device profile model and repository.
+* Active TV connection state.
+* Remote shortcut model and repository.
+* Connection diagnostics service.
+* Unified media/casting state.
+* Screen mirroring lifecycle controller.
+* Persisted user preferences.
+
+Implementation guidelines:
+
+1. Keep network, discovery, file I/O, and encoding work off the main thread.
+2. Use coroutines and lifecycle-aware collection consistently.
+3. Use a single source of truth for connection and mirroring state.
+4. Avoid starting services or network requests from Compose recomposition.
+5. Prevent duplicate observers, callbacks, and reconnect jobs.
+6. Cancel coroutines when the owning component is cleared or a session ends.
+7. Avoid retaining Activity references in long-lived services or repositories.
+8. Add structured logging without secrets.
+9. Use immutable UI state where appropriate.
+10. Handle loading, empty, disconnected, failed, and success states explicitly.
+11. Avoid large-scale refactoring unrelated to the required changes.
+12. Add database migrations if the existing persistence schema changes.
+13. Keep protocol serialization and pairing implementation unchanged unless a verified bug requires a targeted fix.
+14. Avoid introducing new libraries when existing Android and Kotlin APIs suffice.
+
+---
+
+# PHASE 10 — AUTOMATED TESTS AND VALIDATION
+
+Add or improve tests alongside each feature.
+
+## Screen mirroring tests
+
+* Single VirtualDisplay creation per session.
+* Repeated resize updates the existing display.
+* ImageReader replacement and cleanup.
+* Partial-startup failure cleanup.
+* Projection revocation.
+* Repeated stop calls.
+* Rotation/shutdown race conditions.
+* Token invalidation after stop.
+* Exact viewer-count accounting.
+* Concurrent client disconnects.
+* Frame processing exception cleanup.
+
+Use injectable factories or abstractions that exercise real production lifecycle decisions. Do not use a standalone counter function as proof that the Android implementation is correct.
+
+## Release signing tests
+
+* Production signing required but keystore absent: expected failure.
+* Missing password or alias: expected failure.
+* Debug fallback disabled by default.
+* Explicit local/test opt-in behaves as documented.
+* Ordinary debug build remains functional.
+* Verify the actual generated APK/AAB certificate where possible.
+
+## Device profile tests
+
+* Create, edit, rename, select, and delete.
+* Persistence across process restart.
+* Duplicate prevention.
+* Invalid IP handling.
+* Switching profiles.
+* Correct device selected for outgoing commands.
+* Reconnect cancellation and backoff.
+
+## Shortcut tests
+
+* Add, remove, reorder, and persist.
+* Unsupported actions are disabled or hidden.
+* Context changes update shortcuts without removing basic controls.
+* Repeated taps do not start duplicate command loops.
+
+## Diagnostics tests
+
+* Host unavailable.
+* Pairing required.
+* Authentication failure.
+* Successful connection.
+* Timeout.
+* Sensitive-data redaction.
+
+## Casting tests
+
+* File permission handling.
+* Large file streaming without whole-file memory loading.
+* HTTP range requests and seeking.
+* Invalid ranges.
+* MIME type selection.
+* Stream cancellation and temporary-file cleanup.
+* Browser/VLC launch failure handling.
+
+## Adaptive mirroring tests
+
+* Sustained high encoding latency lowers quality.
+* Healthy performance restores quality gradually.
+* Hysteresis prevents rapid oscillation.
+* Manual mode remains unchanged.
+* Viewer disconnect does not corrupt performance state.
+
+Run the actual commands when the environment supports them:
+
+`./gradlew :app:testDebugUnitTest`
+
+`./gradlew :app:assembleDebug`
+
+`./gradlew :app:lint`
+
+`./gradlew :app:assembleRelease`
+
+For release verification, test production-required signing with missing credentials and confirm that the build fails for the intended reason. Test local/test signing separately using the explicit opt-in.
+
+If a command cannot run, report that clearly and explain why. Do not fabricate test results.
+
+---
+
+# PHASE 11 — PHYSICAL DEVICE ACCEPTANCE TESTS
+
+Automated JVM tests do not prove actual Android TV compatibility.
+
+Provide a manual test checklist for a real Android phone and the target TV/TV stick.
+
+Verify:
+
+1. Existing TV pairing and TLS authentication still work.
+2. D-pad, Back, Home, Select, volume, and other supported controls work.
+3. Device profile switching selects the correct TV.
+4. Reconnect works after temporary Wi-Fi loss.
+5. Diagnostics identifies common failure cases accurately.
+6. Local video casting starts and seeking works.
+7. VLC and browser launch results are reported accurately.
+8. Screen mirroring starts only after valid capture consent.
+9. Screen rotation does not create a second VirtualDisplay or stop mirroring.
+10. Lock/unlock behaviour is tested and documented.
+11. Revoking capture permission stops mirroring and cleans up.
+12. Stopping and restarting mirroring repeatedly works.
+13. Multiple viewers do not break the frame pipeline.
+14. A disconnected viewer does not leave a stale viewer count.
+15. The app handles missing Wi-Fi addresses gracefully.
+16. Existing remote controls remain usable while media features are active.
+17. No session token or credential appears in logs.
+18. Production release signing uses the intended production certificate.
+
+Distinguish verified physical-device results from tests that still need to be performed.
+
+---
+
+# IMPLEMENTATION ORDER
+
+Work in this order to minimise regressions:
+
+**Stage A — Critical stability**
+
+1. Release-signing safety.
+2. MediaProjection lifecycle and resizing.
+3. Partial-startup cleanup.
+4. ImageReader frame closure.
+5. Viewer-count and server teardown correctness.
+6. Regression tests.
+
+**Stage B — Core product improvements**
+7. Multi-TV profiles and profile switching.
+8. Reconnection and connection diagnostics.
+9. Remote favourites and context-aware shortcuts.
+10. Keyboard and text-entry improvements.
+
+**Stage C — Media features**
+11. Unified casting hub.
+12. Local media reliability, HTTP range handling, and subtitles where supported.
+13. Mirroring settings and adaptive quality.
+14. Stream status and troubleshooting.
+
+**Stage D — Final integration**
+15. Settings integration and visual consistency.
+16. Full regression tests.
+17. Debug/release build and signing verification.
+18. Physical-device acceptance checklist.
+19. Update project documentation and release notes.
+
+Complete each stage with working code and validation before proceeding. If a feature depends on an unresolved blocker, continue with independent features and document the dependency rather than silently skipping it.
+
+---
+
+# FINAL DELIVERABLES
+
+When finished, provide:
+
+1. A concise summary of the completed critical fixes.
+2. A feature-by-feature implementation report.
+3. A list of added, modified, and deleted files.
+4. Any persistence schema changes and migrations.
+5. Test commands and their actual results.
+6. Build and release-signing results.
+7. Any known limitations or features that remain incomplete.
+8. The physical-device acceptance checklist.
+9. A summary of performance or memory measurements, if collected.
+10. The Git commit SHA and commit URL if the changes were actually pushed.
+
+Do not claim a feature is implemented merely because its UI exists. Each feature must be connected to its real state, repository, service, and action path.
+
+Do not replace functioning code with placeholder methods, fake success states, hardcoded device data, or simulated diagnostics.
+
+**Primary objective:** deliver a stable, extensible, premium-quality MoteTV Android remote with reliable multi-TV management, fast remote controls, useful diagnostics, and a unified casting experience while preserving all existing working functionality.
