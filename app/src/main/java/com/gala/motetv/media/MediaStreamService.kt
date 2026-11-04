@@ -59,25 +59,38 @@ class MediaStreamService : Service() {
             context: Context,
             mediaInfo: SelectedMediaInfo
         ) {
-            val intent = Intent(context, MediaStreamService::class.java).apply {
-                action = ACTION_START_CAST
-                putExtra(EXTRA_URI, mediaInfo.uri)
-                putExtra(EXTRA_FILE_NAME, mediaInfo.name)
-                putExtra(EXTRA_FILE_SIZE, mediaInfo.size)
-                putExtra(EXTRA_MIME_TYPE, mediaInfo.mimeType)
-            }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
+            try {
+                val intent = Intent(context, MediaStreamService::class.java).apply {
+                    action = ACTION_START_CAST
+                    data = mediaInfo.uri
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    putExtra(EXTRA_URI, mediaInfo.uri)
+                    putExtra(EXTRA_FILE_NAME, mediaInfo.name)
+                    putExtra(EXTRA_FILE_SIZE, mediaInfo.size)
+                    putExtra(EXTRA_MIME_TYPE, mediaInfo.mimeType)
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(intent)
+                } else {
+                    context.startService(intent)
+                }
+            } catch (e: Exception) {
+                TvLogger.e(TvLogger.TAG_GENERAL, "[MEDIA_STREAM_SERVICE] startStreaming error: ${e.message}", e)
             }
         }
 
         fun stopStreaming(context: Context) {
-            val intent = Intent(context, MediaStreamService::class.java).apply {
-                action = ACTION_STOP_CAST
+            try {
+                val intent = Intent(context, MediaStreamService::class.java).apply {
+                    action = ACTION_STOP_CAST
+                }
+                context.startService(intent)
+            } catch (e: Exception) {
+                TvLogger.w(TvLogger.TAG_GENERAL, "[MEDIA_STREAM_SERVICE] startService for STOP_CAST failed (${e.message}), stopping service directly")
+                try {
+                    context.stopService(Intent(context, MediaStreamService::class.java))
+                } catch (_: Exception) {}
             }
-            context.startService(intent)
         }
     }
 
@@ -190,10 +203,26 @@ class MediaStreamService : Service() {
     }
 
     private fun stopCastingSession() {
-        mediaServer.stopStreaming()
+        try {
+            mediaServer.stopStreaming()
+        } catch (_: Exception) {}
         releaseLocks()
+        stopForegroundSafely()
         _streamingState.value = CastSessionState.Idle
         TvLogger.i(TvLogger.TAG_GENERAL, "[MEDIA_STREAM_SERVICE] Streaming session stopped and locks released")
+    }
+
+    private fun stopForegroundSafely() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+            } else {
+                @Suppress("DEPRECATION")
+                stopForeground(true)
+            }
+        } catch (e: Exception) {
+            TvLogger.w(TvLogger.TAG_GENERAL, "[MEDIA_STREAM_SERVICE] Error in stopForegroundSafely: ${e.message}")
+        }
     }
 
     @Synchronized

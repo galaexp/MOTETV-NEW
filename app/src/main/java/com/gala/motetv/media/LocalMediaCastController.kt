@@ -15,6 +15,7 @@ import com.google.android.apps.tv.remote.protocol.Direction
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -45,7 +46,9 @@ sealed class CastSessionState {
 class LocalMediaCastController(
     private val context: Context,
     private val remoteManager: TvRemoteManager,
-    private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main + kotlinx.coroutines.CoroutineExceptionHandler { _, throwable ->
+        TvLogger.e(TvLogger.TAG_GENERAL, "[LOCAL_MEDIA_CAST_CONTROLLER] Uncaught exception: ${throwable.message}", throwable)
+    })
 ) {
     private val _sessionState = MutableStateFlow<CastSessionState>(CastSessionState.Idle)
     val sessionState: StateFlow<CastSessionState> = _sessionState.asStateFlow()
@@ -53,6 +56,7 @@ class LocalMediaCastController(
     private var boundService: MediaStreamService? = null
     private var isBound = false
     private var serviceConnectedDeferred = CompletableDeferred<MediaStreamService>()
+    private var streamStateCollectorJob: Job? = null
 
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
@@ -65,9 +69,10 @@ class LocalMediaCastController(
             }
             TvLogger.i(TvLogger.TAG_GENERAL, "[LOCAL_MEDIA_CAST_CONTROLLER] Bound to MediaStreamService")
 
-            // Observe streaming state from service
+            // Observe streaming state from service safely with single collector job
+            streamStateCollectorJob?.cancel()
             if (svc != null) {
-                scope.launch {
+                streamStateCollectorJob = scope.launch {
                     svc.streamingState.collect { state ->
                         // Reflect active streaming or error state in UI
                         if (state is CastSessionState.Streaming || state is CastSessionState.Error) {
@@ -81,6 +86,8 @@ class LocalMediaCastController(
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
+            streamStateCollectorJob?.cancel()
+            streamStateCollectorJob = null
             boundService = null
             isBound = false
             serviceConnectedDeferred = CompletableDeferred()
@@ -206,13 +213,18 @@ class LocalMediaCastController(
      */
     fun stopCast() {
         scope.launch(Dispatchers.IO) {
-            TvLogger.i(TvLogger.TAG_GENERAL, "[MEDIA_CAST] Stopping cast and service")
-            MediaStreamService.stopStreaming(context)
+            try {
+                TvLogger.i(TvLogger.TAG_GENERAL, "[MEDIA_CAST] Stopping cast and service")
+                MediaStreamService.stopStreaming(context)
 
-            if (remoteManager.remoteState.value == RemoteState.READY) {
-                remoteManager.sendKey(AndroidTvKeyCodes.KEYCODE_MEDIA_STOP, Direction.SHORT)
+                if (remoteManager.remoteState.value == RemoteState.READY) {
+                    remoteManager.sendKey(AndroidTvKeyCodes.KEYCODE_MEDIA_STOP, Direction.SHORT)
+                }
+            } catch (e: Exception) {
+                TvLogger.w(TvLogger.TAG_GENERAL, "[MEDIA_CAST] stopCast error: ${e.message}")
+            } finally {
+                _sessionState.value = CastSessionState.Idle
             }
-            _sessionState.value = CastSessionState.Idle
         }
     }
 
@@ -280,11 +292,14 @@ class LocalMediaCastController(
     }
 
     fun cleanUpOnAppExit() {
+        streamStateCollectorJob?.cancel()
+        streamStateCollectorJob = null
         if (isBound) {
             try {
                 context.unbindService(serviceConnection)
             } catch (_: Exception) {}
             isBound = false
         }
+        boundService = null
     }
 }

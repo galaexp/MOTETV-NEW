@@ -108,6 +108,9 @@ fun RemoteControlScreen(
     var skipAdFeedback by remember { mutableStateOf<String?>(null) }
     val isConnected = connectionState is ConnectionState.Ready
 
+    val isReconnecting = connectionState is ConnectionState.Connecting || connectionState is ConnectionState.Reconnecting
+    val isFailed = connectionState is ConnectionState.Failed
+
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -130,11 +133,18 @@ fun RemoteControlScreen(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // TV Status Pill
+                // TV Status Pill with tap-to-reconnect
                 Row(
                     modifier = Modifier
                         .clip(RoundedCornerShape(16.dp))
-                        .clickable { onOpenDevices() }
+                        .clickable {
+                            performHaptic()
+                            if (!isConnected && device != null) {
+                                onReconnect()
+                            } else {
+                                onOpenDevices()
+                            }
+                        }
                         .padding(horizontal = 8.dp, vertical = 4.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -142,27 +152,69 @@ fun RemoteControlScreen(
                         modifier = Modifier
                             .size(10.dp)
                             .clip(CircleShape)
-                            .background(if (isConnected) StatusSuccessGreen else StatusErrorRed)
+                            .background(
+                                when {
+                                    isConnected -> StatusSuccessGreen
+                                    isReconnecting -> Color(0xFFF59E0B)
+                                    else -> StatusErrorRed
+                                }
+                            )
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Column {
                         Text(
-                            text = if (isConnected) (device?.name ?: "Connected TV") else "TV Disconnected",
+                            text = when {
+                                isConnected -> device?.name ?: "Connected TV"
+                                isReconnecting -> device?.name ?: "Reconnecting TV"
+                                device != null -> device.name
+                                else -> "No TV Selected"
+                            },
                             style = Typography.titleSmall.copy(fontWeight = FontWeight.Bold),
                             color = Color.White,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
                         Text(
-                            text = if (isConnected) "Tap to switch TV" else "Tap to pair",
+                            text = when {
+                                isConnected -> "Connected • Tap to switch"
+                                isReconnecting -> "Reconnecting..."
+                                device != null -> "Offline • Tap to reconnect"
+                                else -> "Tap to scan & pair"
+                            },
                             style = Typography.labelSmall.copy(fontSize = 11.sp),
-                            color = Color(0xFF94A3B8)
+                            color = when {
+                                isConnected -> Color(0xFF94A3B8)
+                                isReconnecting -> Color(0xFFFCD34D)
+                                else -> Color(0xFFFCA5A5)
+                            }
                         )
                     }
                 }
 
                 // Quick Power & Input Actions
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    // Quick Reconnect Button if disconnected
+                    if (!isConnected && device != null) {
+                        IconButton(
+                            onClick = {
+                                performHaptic()
+                                onReconnect()
+                            },
+                            modifier = Modifier
+                                .size(40.dp)
+                                .clip(CircleShape)
+                                .background(Color(0xFF1E293B))
+                                .border(1.dp, Color(0xFF38BDF8), CircleShape)
+                                .testTag("btn_quick_reconnect")
+                        ) {
+                            if (isReconnecting) {
+                                CircularProgressIndicator(modifier = Modifier.size(18.dp), color = Color(0xFF38BDF8), strokeWidth = 2.dp)
+                            } else {
+                                Icon(Icons.Default.Refresh, contentDescription = "Reconnect", tint = Color(0xFF38BDF8), modifier = Modifier.size(20.dp))
+                            }
+                        }
+                    }
+
                     // TV Input Button
                     RemoteIconButton(
                         icon = Icons.Default.Tv,
@@ -197,6 +249,72 @@ fun RemoteControlScreen(
                             contentDescription = "Power",
                             tint = Color.White,
                             modifier = Modifier.size(22.dp)
+                        )
+                    }
+                }
+            }
+        }
+
+        // DISCONNECTION WARNING BANNER
+        AnimatedVisibility(
+            visible = isFailed && device != null,
+            enter = fadeIn(),
+            exit = fadeOut()
+        ) {
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = Color(0x33EF4444),
+                border = BorderStroke(1.dp, Color(0xFFEF4444)),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable {
+                        performHaptic()
+                        onReconnect()
+                    }
+                    .testTag("banner_connection_failed")
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.CloudOff,
+                            contentDescription = null,
+                            tint = Color(0xFFEF4444),
+                            modifier = Modifier.size(22.dp)
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Column {
+                            Text(
+                                text = "TV Connection Dropped",
+                                style = Typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                                color = Color.White
+                            )
+                            Text(
+                                text = "Screen was off or network changed. Tap to reconnect.",
+                                style = Typography.bodySmall.copy(fontSize = 11.sp),
+                                color = Color(0xFFCBD5E1)
+                            )
+                        }
+                    }
+                    Button(
+                        onClick = {
+                            performHaptic()
+                            onReconnect()
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFEF4444)),
+                        shape = RoundedCornerShape(10.dp),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
+                    ) {
+                        Text(
+                            text = "Reconnect",
+                            color = Color.White,
+                            style = Typography.labelSmall.copy(fontWeight = FontWeight.Bold)
                         )
                     }
                 }

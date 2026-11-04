@@ -9,6 +9,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.util.regex.Pattern
 
 enum class DiagnosticStatus {
     PASSED, FAILED, NOT_AVAILABLE
@@ -29,9 +30,20 @@ data class DiagnosticReport(
 )
 
 class DiagnosticsService(
-    private val context: Context,
+    private val context: Context?,
     private val credentialStore: TvCredentialStore
 ) {
+    companion object {
+        // Strict IPv4 Regex validating octets 0..255
+        private val STRICT_IPV4_PATTERN = Pattern.compile(
+            "^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])$"
+        )
+    }
+
+    fun isValidIpAddress(ip: String): Boolean {
+        if (ip.isBlank()) return false
+        return STRICT_IPV4_PATTERN.matcher(ip.trim()).matches()
+    }
 
     suspend fun runDiagnostics(
         selectedDevice: TvDevice?,
@@ -39,42 +51,42 @@ class DiagnosticsService(
     ): DiagnosticReport = withContext(Dispatchers.IO) {
         val items = mutableListOf<DiagnosticItem>()
 
-        // 1. Wi-Fi / Local Network Check
+        // 1. Local Wi-Fi Adapter Check
         val mirrorServer = ScreenMirrorServer()
         val localIp = mirrorServer.getLocalIpAddress()
         if (localIp != null && localIp != "127.0.0.1" && !localIp.startsWith("169.254.")) {
             items.add(
                 DiagnosticItem(
                     id = "wifi_network",
-                    name = "Wi-Fi LAN Connection",
+                    name = "Local Wi-Fi Network Adapter",
                     status = DiagnosticStatus.PASSED,
-                    explanation = "Phone is connected to local network (IP: $localIp)",
-                    suggestedAction = "Network active"
+                    explanation = "Phone is connected to local network (Local IP: $localIp)",
+                    suggestedAction = "Adapter active. Ensure TV is on the same subnet."
                 )
             )
         } else {
             items.add(
                 DiagnosticItem(
                     id = "wifi_network",
-                    name = "Wi-Fi LAN Connection",
+                    name = "Local Wi-Fi Network Adapter",
                     status = DiagnosticStatus.FAILED,
-                    explanation = "No active local Wi-Fi IP detected",
-                    suggestedAction = "Connect phone to the same 2.4/5GHz Wi-Fi as your Android TV"
+                    explanation = "No active local Wi-Fi IPv4 address detected",
+                    suggestedAction = "Connect phone to the same 2.4/5GHz Wi-Fi network as your TV"
                 )
             )
         }
 
-        // 2. Configured TV Device & IP Check
+        // 2. Configured TV Device & IP Check (Strict IPv4 Validation)
         val host = selectedDevice?.host
         if (!host.isNullOrBlank()) {
-            val isValidIp = host.matches(Regex("^([0-9]{1,3}\\.){3}[0-9]{1,3}$"))
+            val isValidIp = isValidIpAddress(host)
             if (isValidIp) {
                 items.add(
                     DiagnosticItem(
                         id = "tv_ip_format",
                         name = "TV IP Address Format",
                         status = DiagnosticStatus.PASSED,
-                        explanation = "Target TV IP is valid ($host)",
+                        explanation = "Target TV IP address format is valid ($host)",
                         suggestedAction = "IP format valid"
                     )
                 )
@@ -89,7 +101,7 @@ class DiagnosticsService(
                             id = "tv_reachability",
                             name = "Android TV Endpoint Reachability",
                             status = DiagnosticStatus.PASSED,
-                            explanation = "TV remote service detected on $host (TCP 6466/6467)",
+                            explanation = "TV remote service endpoint reached at $host (TCP 6466/6467)",
                             suggestedAction = "TV endpoint online"
                         )
                     )
@@ -99,8 +111,8 @@ class DiagnosticsService(
                             id = "tv_reachability",
                             name = "Android TV Endpoint Reachability",
                             status = DiagnosticStatus.FAILED,
-                            explanation = "Cannot reach Android TV service at $host:6466 or 6467",
-                            suggestedAction = "Ensure TV is powered on, awake, and not blocking local network discovery"
+                            explanation = "Cannot open TCP connection to $host:6466 or 6467",
+                            suggestedAction = "Verify TV power, IP address, and that TV is awake on same network"
                         )
                     )
                 }
@@ -110,7 +122,7 @@ class DiagnosticsService(
                         id = "tv_ip_format",
                         name = "TV IP Address Format",
                         status = DiagnosticStatus.FAILED,
-                        explanation = "Invalid IP address format: '$host'",
+                        explanation = "Invalid IPv4 format or out-of-range octets: '$host'",
                         suggestedAction = "Check TV Settings > Network and enter a valid IPv4 address"
                     )
                 )
@@ -121,13 +133,13 @@ class DiagnosticsService(
                     id = "tv_ip_format",
                     name = "Target TV Device Selection",
                     status = DiagnosticStatus.FAILED,
-                    explanation = "No Android TV selected or configured",
+                    explanation = "No Android TV device selected or configured",
                     suggestedAction = "Tap 'Pair TV' to scan or add TV via IP"
                 )
             )
         }
 
-        // 4. Client TLS Credentials & Pairing Status
+        // 4. Cached Client TLS Credentials (Distinguished from Live Session)
         val devId = selectedDevice?.id ?: "default"
         val isPaired = credentialStore.isDevicePaired(devId)
         val fp = credentialStore.getServerFingerprint(devId)
@@ -136,25 +148,25 @@ class DiagnosticsService(
             items.add(
                 DiagnosticItem(
                     id = "tls_credentials",
-                    name = "TLS Pairing Credentials",
+                    name = "Cached TLS Credentials",
                     status = DiagnosticStatus.PASSED,
-                    explanation = "Paired identity and server certificate fingerprint cached",
-                    suggestedAction = "Credentials ready"
+                    explanation = "Cached client certificate and server fingerprint present in local store",
+                    suggestedAction = "Cached credentials ready"
                 )
             )
         } else {
             items.add(
                 DiagnosticItem(
                     id = "tls_credentials",
-                    name = "TLS Pairing Credentials",
+                    name = "Cached TLS Credentials",
                     status = DiagnosticStatus.FAILED,
-                    explanation = "TV not yet paired or pairing credentials missing",
+                    explanation = "No paired client certificate or server fingerprint cached for device",
                     suggestedAction = "Perform 6-digit code TV pairing flow"
                 )
             )
         }
 
-        // 5. Active Protocol Connection State
+        // 5. Live Protocol Session Handshake Check
         val connStatus = when (currentConnectionState) {
             is ConnectionState.Ready -> DiagnosticStatus.PASSED
             is ConnectionState.Connecting, is ConnectionState.Pairing -> DiagnosticStatus.NOT_AVAILABLE
@@ -164,10 +176,14 @@ class DiagnosticsService(
         items.add(
             DiagnosticItem(
                 id = "connection_state",
-                name = "Active Protocol Session",
+                name = "Live Protocol Handshake",
                 status = connStatus,
-                explanation = "Current State: ${currentConnectionState::class.simpleName}",
-                suggestedAction = if (connStatus == DiagnosticStatus.PASSED) "Active" else "Tap Connect in header to reconnect"
+                explanation = if (currentConnectionState is ConnectionState.Ready) {
+                    "Live TLS session established and active with TV"
+                } else {
+                    "No active protocol session (Current State: ${currentConnectionState::class.simpleName})"
+                },
+                suggestedAction = if (connStatus == DiagnosticStatus.PASSED) "Active" else "Tap Connect in header to initiate session"
             )
         )
 

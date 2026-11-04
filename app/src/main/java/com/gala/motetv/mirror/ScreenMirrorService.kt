@@ -73,6 +73,9 @@ class ScreenMirrorService : Service() {
         private const val CHANNEL_ID = "mote_screen_mirror_channel"
         private const val NOTIFICATION_ID = 2002
 
+        const val MIN_JPEG_QUALITY = 30
+        const val MAX_JPEG_QUALITY = 85
+
         private val _isMirroring = MutableStateFlow(false)
         val isMirroring: StateFlow<Boolean> = _isMirroring.asStateFlow()
 
@@ -309,10 +312,10 @@ class ScreenMirrorService : Service() {
                             _encodingMs.value = duration
 
                             // Adaptive Quality Check: if encoding takes too long (> 35ms), lower JPEG quality
-                            if (duration > 35 && jpegQuality > 40) {
-                                jpegQuality = (jpegQuality - 5).coerceAtLeast(30)
-                            } else if (duration < 18 && jpegQuality < 80 && frameCount % 30 == 0) {
-                                jpegQuality = (jpegQuality + 2).coerceAtMost(85)
+                            if (duration > 35 && jpegQuality > MIN_JPEG_QUALITY) {
+                                jpegQuality = (jpegQuality - 5).coerceAtLeast(MIN_JPEG_QUALITY)
+                            } else if (duration < 18 && jpegQuality < MAX_JPEG_QUALITY && frameCount % 30 == 0) {
+                                jpegQuality = (jpegQuality + 2).coerceAtMost(MAX_JPEG_QUALITY)
                             }
 
                             frameCount++
@@ -376,7 +379,7 @@ class ScreenMirrorService : Service() {
     }
 
     private fun stopMirroring() {
-        if (!isMirroringActive.getAndSet(false)) return
+        isMirroringActive.set(false)
         _isMirroring.value = false
         _streamUrl.value = ""
         _webUrl.value = ""

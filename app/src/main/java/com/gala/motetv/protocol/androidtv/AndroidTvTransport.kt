@@ -55,6 +55,8 @@ class AndroidTvTransport(
             val socket = sslContext.socketFactory.createSocket() as SSLSocket
             socket.useClientMode = true
             socket.soTimeout = readTimeoutMs
+            socket.keepAlive = true
+            socket.tcpNoDelay = true
             socket.enabledProtocols = arrayOf("TLSv1.3", "TLSv1.2")
 
             socket.connect(InetSocketAddress(host, port), connectTimeoutMs)

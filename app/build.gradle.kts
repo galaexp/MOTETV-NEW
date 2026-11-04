@@ -26,17 +26,22 @@ android {
     create("release") {
       val keystorePath = System.getenv("KEYSTORE_PATH") ?: "${rootDir}/my-upload-key.jks"
       val store = file(keystorePath)
+
       val releaseSigningRequired = (System.getenv("RELEASE_SIGNING_REQUIRED") ?: "false").toBoolean() ||
           (project.findProperty("releaseSigningRequired") as? String)?.toBoolean() == true
-      val allowDebugFallback = (System.getenv("ALLOW_DEBUG_RELEASE_SIGNING") ?: (!releaseSigningRequired).toString()).toBoolean() ||
+
+      // ALLOW_DEBUG_RELEASE_SIGNING defaults to false unless explicitly opted in
+      val explicitOptIn = (System.getenv("ALLOW_DEBUG_RELEASE_SIGNING") ?: "false").toBoolean() ||
           (project.findProperty("allowDebugReleaseSigning") as? String)?.toBoolean() == true
+
+      val allowDebugFallback = explicitOptIn && !releaseSigningRequired
 
       if (store.exists()) {
         storeFile = store
         storePassword = System.getenv("STORE_PASSWORD")
         keyAlias = System.getenv("KEY_ALIAS") ?: "upload"
         keyPassword = System.getenv("KEY_PASSWORD")
-      } else if (allowDebugFallback && !releaseSigningRequired) {
+      } else if (allowDebugFallback) {
         val debugStore = file("${rootDir}/debug.keystore")
         if (debugStore.exists()) {
           storeFile = debugStore
@@ -45,13 +50,21 @@ android {
           keyPassword = "android"
         } else {
           throw InvalidUserDataException(
-            "Release signing failed: Neither production keystore '$keystorePath' nor fallback debug keystore '${debugStore.absolutePath}' exists."
+            "Release signing failed: Production upload keystore '$keystorePath' was not found and debug fallback keystore '${debugStore.absolutePath}' does not exist."
           )
         }
       } else {
+        val reason = if (releaseSigningRequired) {
+          "RELEASE_SIGNING_REQUIRED is set to true and production upload keystore '$keystorePath' was not found."
+        } else {
+          "Production upload keystore '$keystorePath' was not found and debug fallback was not explicitly enabled. Default ALLOW_DEBUG_RELEASE_SIGNING is false."
+        }
         throw InvalidUserDataException(
-          "Release signing failed: Production upload keystore '$keystorePath' was not found and RELEASE_SIGNING_REQUIRED is true. " +
-          "To perform production release builds, ensure KEYSTORE_PATH, STORE_PASSWORD, and KEY_PASSWORD environment variables are set."
+          "Release signing failed: $reason\n" +
+          "To configure a production release build:\n" +
+          "  1. Place release keystore at '$keystorePath' or set KEYSTORE_PATH environment variable.\n" +
+          "  2. Provide STORE_PASSWORD, KEY_ALIAS, and KEY_PASSWORD environment variables.\n" +
+          "For local/test release builds only, set ALLOW_DEBUG_RELEASE_SIGNING=true or -PallowDebugReleaseSigning=true."
         )
       }
     }

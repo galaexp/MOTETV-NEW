@@ -23,4 +23,5 @@ interface TvRemoteManager {
     fun sendImeTextWithFallback(text: String, useKeyCodesFallback: Boolean = false)
     fun sendChar(char: Char)
     fun launchAppLink(appLink: String)
+    fun reconnectIfDisconnected() {}
 }

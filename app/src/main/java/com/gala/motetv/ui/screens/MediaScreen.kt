@@ -3,6 +3,7 @@ package com.gala.motetv.ui.screens
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -21,6 +22,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.gala.motetv.core.model.AndroidTvKeyCodes
@@ -53,7 +55,7 @@ fun MediaScreen(
             .fillMaxSize()
             .background(BackgroundDark)
             .statusBarsPadding()
-            .padding(16.dp)
+            .padding(horizontal = 16.dp, vertical = 12.dp)
     ) {
         Column(
             modifier = Modifier
@@ -62,46 +64,63 @@ fun MediaScreen(
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
             // HEADER & TV STATUS PILL
-            Row(
+            GlassCard(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+                shape = RoundedCornerShape(20.dp)
             ) {
-                Column {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Media Cast",
+                            style = Typography.headlineSmall.copy(fontWeight = FontWeight.Bold),
+                            color = Color.White
+                        )
+
+                        // Clean horizontal TV status badge
+                        Surface(
+                            shape = RoundedCornerShape(16.dp),
+                            color = if (isConnected) Color(0x2210B981) else Color(0x22EF4444),
+                            border = BorderStroke(1.dp, if (isConnected) Color(0xFF10B981) else Color(0xFFEF4444)),
+                            modifier = Modifier.clickable {
+                                if (!isConnected && device != null) onReconnect() else onOpenDevices()
+                            }
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(8.dp)
+                                        .clip(CircleShape)
+                                        .background(if (isConnected) Color(0xFF10B981) else Color(0xFFEF4444))
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = if (isConnected) (device?.name ?: "TV Connected") else if (device != null) "${device.name} • Reconnect" else "TV Offline",
+                                    style = Typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                    color = Color.White,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                    }
+
                     Text(
-                        text = "Media Cast",
-                        style = Typography.headlineMedium.copy(fontWeight = FontWeight.Bold),
-                        color = Color.White
-                    )
-                    Text(
-                        text = "Cast phone movies, music & videos directly to TV",
+                        text = "Stream local movies, audio & photos directly to TV via VLC",
                         style = Typography.bodySmall,
                         color = Color(0xFF94A3B8)
                     )
-                }
-
-                Surface(
-                    shape = RoundedCornerShape(12.dp),
-                    color = if (isConnected) Color(0x2210B981) else Color(0x22EF4444),
-                    border = BorderStroke(1.dp, if (isConnected) Color(0xFF10B981) else Color(0xFFEF4444))
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .size(8.dp)
-                                .clip(CircleShape)
-                                .background(if (isConnected) Color(0xFF10B981) else Color(0xFFEF4444))
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(
-                            text = if (isConnected) (device?.name ?: "TV Connected") else "TV Offline",
-                            style = Typography.labelSmall.copy(fontWeight = FontWeight.Bold),
-                            color = Color.White
-                        )
-                    }
                 }
             }
 
@@ -124,7 +143,7 @@ fun MediaScreen(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(18.dp),
-                    verticalArrangement = Arrangement.spacedBy(14.dp)
+                    verticalArrangement = Arrangement.spacedBy(16.dp)
                 ) {
                     Text(
                         text = "TV PLAYBACK & VOLUME",
@@ -132,7 +151,7 @@ fun MediaScreen(
                         color = Color(0xFF64748B)
                     )
 
-                    // Playback row
+                    // Playback Controls Row
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceEvenly,
@@ -153,7 +172,7 @@ fun MediaScreen(
                         // Big Play / Pause Button
                         Box(
                             modifier = Modifier
-                                .size(68.dp)
+                                .size(64.dp)
                                 .clip(CircleShape)
                                 .background(Color(0xFF0284C7))
                                 .border(1.5.dp, Color(0xFF38BDF8), CircleShape),
@@ -163,7 +182,7 @@ fun MediaScreen(
                                 onClick = { onSendKey(AndroidTvKeyCodes.KEYCODE_MEDIA_PLAY_PAUSE, Direction.SHORT) },
                                 modifier = Modifier.fillMaxSize()
                             ) {
-                                Icon(Icons.Default.PlayArrow, contentDescription = "Play/Pause", tint = Color.White, modifier = Modifier.size(38.dp))
+                                Icon(Icons.Default.PlayArrow, contentDescription = "Play/Pause", tint = Color.White, modifier = Modifier.size(36.dp))
                             }
                         }
 
@@ -180,45 +199,54 @@ fun MediaScreen(
                         }
                     }
 
-                    Spacer(modifier = Modifier.height(6.dp))
+                    Divider(color = Color(0xFF1E293B), thickness = 1.dp)
 
-                    // Volume Controls Row
+                    // Volume Controls Row with 3 equal weights
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceEvenly,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
+                        // VOL -
                         Button(
                             onClick = { onSendKey(AndroidTvKeyCodes.KEYCODE_VOLUME_DOWN, Direction.SHORT) },
                             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1E293B)),
                             border = BorderStroke(1.dp, Color(0xFF334155)),
-                            shape = RoundedCornerShape(14.dp)
+                            shape = RoundedCornerShape(14.dp),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp),
+                            modifier = Modifier.weight(1f)
                         ) {
-                            Icon(Icons.AutoMirrored.Filled.VolumeDown, contentDescription = null, tint = Color.White)
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("VOL -", color = Color.White)
+                            Icon(Icons.AutoMirrored.Filled.VolumeDown, contentDescription = "Vol Down", tint = Color.White, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("VOL -", color = Color.White, style = Typography.labelMedium.copy(fontWeight = FontWeight.Bold))
                         }
 
+                        // MUTE
                         Button(
                             onClick = { onSendKey(AndroidTvKeyCodes.KEYCODE_VOLUME_MUTE, Direction.SHORT) },
                             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1E293B)),
                             border = BorderStroke(1.dp, Color(0xFFEF4444)),
-                            shape = RoundedCornerShape(14.dp)
+                            shape = RoundedCornerShape(14.dp),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp),
+                            modifier = Modifier.weight(1f)
                         ) {
-                            Icon(Icons.AutoMirrored.Filled.VolumeMute, contentDescription = null, tint = Color(0xFFEF4444))
+                            Icon(Icons.AutoMirrored.Filled.VolumeMute, contentDescription = "Mute", tint = Color(0xFFEF4444), modifier = Modifier.size(18.dp))
                             Spacer(modifier = Modifier.width(4.dp))
-                            Text("Mute", color = Color(0xFFEF4444))
+                            Text("Mute", color = Color(0xFFEF4444), style = Typography.labelMedium.copy(fontWeight = FontWeight.Bold))
                         }
 
+                        // VOL +
                         Button(
                             onClick = { onSendKey(AndroidTvKeyCodes.KEYCODE_VOLUME_UP, Direction.SHORT) },
                             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1E293B)),
                             border = BorderStroke(1.dp, Color(0xFF334155)),
-                            shape = RoundedCornerShape(14.dp)
+                            shape = RoundedCornerShape(14.dp),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp),
+                            modifier = Modifier.weight(1f)
                         ) {
-                            Icon(Icons.AutoMirrored.Filled.VolumeUp, contentDescription = null, tint = Color.White)
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("VOL +", color = Color.White)
+                            Icon(Icons.AutoMirrored.Filled.VolumeUp, contentDescription = "Vol Up", tint = Color.White, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("VOL +", color = Color.White, style = Typography.labelMedium.copy(fontWeight = FontWeight.Bold))
                         }
                     }
                 }
@@ -238,11 +266,11 @@ fun MediaScreen(
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.Default.Info, contentDescription = null, tint = Color(0xFF38BDF8), modifier = Modifier.size(18.dp))
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text("VLC Direct Streaming", style = Typography.titleSmall.copy(fontWeight = FontWeight.Bold), color = Color.White)
+                        Text("VLC Direct Streaming Guide", style = Typography.titleSmall.copy(fontWeight = FontWeight.Bold), color = Color.White)
                     }
 
                     Text(
-                        text = "MoteTV runs a local high-performance HTTP streaming server directly on your phone. When you pick a video, it dispatches the direct stream link into VLC on your TV for instant, crystal-clear playback without cloud latency or transcoding.",
+                        text = "MoteTV runs a local high-performance HTTP streaming server directly on your phone. Selecting a video dispatches the stream link directly into VLC on your TV for instant playback without cloud transcoding.",
                         style = Typography.bodySmall,
                         color = Color(0xFF94A3B8)
                     )

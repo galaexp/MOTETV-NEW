@@ -29,12 +29,17 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.EOFException
 import java.io.IOException
 
 class TvRemoteManagerImpl(
     private val credentialStore: TvCredentialStore,
-    private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val scope: CoroutineScope = CoroutineScope(
+        SupervisorJob() + Dispatchers.IO + kotlinx.coroutines.CoroutineExceptionHandler { _, throwable ->
+            TvLogger.e(TvLogger.TAG_REMOTE, "Uncaught coroutine exception in TvRemoteManager: ${throwable.message}", throwable)
+        }
+    )
 ) : TvRemoteManager {
 
     private val _connectionState = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
@@ -55,6 +60,7 @@ class TvRemoteManagerImpl(
     private var connectionJob: Job? = null
     private var readLoopJob: Job? = null
     private var reconnectJob: Job? = null
+    private var keepAliveJob: Job? = null
     private var transport: AndroidTvTransport? = null
 
     private val writeMutex = Mutex()
@@ -66,6 +72,7 @@ class TvRemoteManagerImpl(
         reconnectJob?.cancel()
         connectionJob?.cancel()
         readLoopJob?.cancel()
+        cleanup()
 
         _currentDevice.value = device
 
@@ -134,15 +141,16 @@ class TvRemoteManagerImpl(
             sendRemoteMessage(setActiveMsg)
             updateRemoteState(RemoteState.SET_ACTIVE_SENT)
 
-            // Step 5: WAIT FOR RX RemoteSetActive
-            TvLogger.i(TvLogger.TAG_REMOTE, "Waiting for RemoteSetActive from TV...")
-            withTimeout(10000) {
+            // Step 5: WAIT FOR RX RemoteSetActive (optional non-blocking ack wait)
+            TvLogger.i(TvLogger.TAG_REMOTE, "Waiting for RemoteSetActive / RemoteStart ack from TV...")
+            withTimeoutOrNull(3000) {
                 setActiveReceivedDeferred?.await()
             }
 
             // Step 6: REMOTE READY
             updateRemoteState(RemoteState.READY)
             _connectionState.value = ConnectionState.Ready(device)
+            startKeepAliveLoop()
             TvLogger.i(TvLogger.TAG_REMOTE, "Remote session READY! Device control active.")
 
         } catch (e: Exception) {
@@ -150,14 +158,18 @@ class TvRemoteManagerImpl(
             cleanup()
             updateRemoteState(RemoteState.ERROR)
 
-            if (retryCount < 3 && _currentDevice.value != null) {
-                scheduleReconnect(device, retryCount + 1)
-            } else {
-                _connectionState.value = ConnectionState.Failed(
-                    errorCode = "ERR_REMOTE_CONNECT",
-                    userMessage = "Paired — reconnecting to TV...",
-                    technicalDetail = e.message
-                )
+            if (_currentDevice.value != null) {
+                if (retryCount < 4) {
+                    scheduleReconnect(device, retryCount + 1)
+                } else {
+                    _connectionState.value = ConnectionState.Failed(
+                        errorCode = "ERR_REMOTE_CONNECT",
+                        userMessage = "Paired — TV offline or sleeping. Retrying...",
+                        technicalDetail = e.message
+                    )
+                    // Continue periodic background retries so it automatically recovers as soon as TV wakes up
+                    scheduleReconnect(device, retryCount = 5)
+                }
             }
         }
     }
@@ -167,17 +179,53 @@ class TvRemoteManagerImpl(
         readLoopJob = scope.launch(Dispatchers.IO) {
             try {
                 while (isActive && transport?.isConnected == true) {
-                    val frameBytes = reader.readNextFrame()
-                    val firstBytesHex = frameBytes.take(8).joinToString("") { "%02X".format(it) }
-                    TvLogger.d(TvLogger.TAG_REMOTE, "[REMOTE_READER] FRAME RX: length=${frameBytes.size} firstBytes=[$firstBytesHex]")
+                    try {
+                        val frameBytes = reader.readNextFrame()
+                        val firstBytesHex = frameBytes.take(8).joinToString("") { "%02X".format(it) }
+                        TvLogger.d(TvLogger.TAG_REMOTE, "[REMOTE_READER] FRAME RX: length=${frameBytes.size} firstBytes=[$firstBytesHex]")
 
-                    val msg = RemoteMessage.ADAPTER.decode(frameBytes)
-                    handleIncomingMessage(msg)
+                        val msg = RemoteMessage.ADAPTER.decode(frameBytes)
+                        handleIncomingMessage(msg)
+                    } catch (e: java.net.SocketTimeoutException) {
+                        // Expected during idle periods — send keepalive ping to verify socket health
+                        if (isActive && transport?.isConnected == true) {
+                            TvLogger.d(TvLogger.TAG_REMOTE, "[REMOTE_READER] Idle socket timeout, sending keepalive ping")
+                            sendKeepAlivePing()
+                        }
+                    }
                 }
             } catch (e: Exception) {
                 if (isActive) {
                     TvLogger.w(TvLogger.TAG_REMOTE, "Remote reader loop terminated: ${e.message}")
                     handleDisconnection(device)
+                }
+            }
+        }
+    }
+
+    private fun startKeepAliveLoop() {
+        keepAliveJob?.cancel()
+        keepAliveJob = scope.launch(Dispatchers.IO) {
+            while (isActive && transport?.isConnected == true) {
+                kotlinx.coroutines.delay(15000L)
+                if (isActive && _remoteState.value == RemoteState.READY && transport?.isConnected == true) {
+                    sendKeepAlivePing()
+                }
+            }
+        }
+    }
+
+    private fun sendKeepAlivePing() {
+        if (_remoteState.value == RemoteState.READY && transport?.isConnected == true) {
+            scope.launch(Dispatchers.IO) {
+                try {
+                    val pingMsg = RemoteMessage(
+                        remote_ping_request = com.google.android.apps.tv.remote.protocol.RemotePingRequest(val1 = 1)
+                    )
+                    sendRemoteMessage(pingMsg)
+                } catch (e: Exception) {
+                    TvLogger.w(TvLogger.TAG_REMOTE, "Keepalive ping failed: ${e.message}")
+                    _currentDevice.value?.let { handleDisconnection(it) }
                 }
             }
         }
@@ -216,7 +264,7 @@ class TvRemoteManagerImpl(
             msg.remote_error != null -> {
                 val err = msg.remote_error
                 TvLogger.e(TvLogger.TAG_REMOTE, "REMOTE ERROR:\nvalue=${err.value}\nmessageType=${err.message}")
-                updateRemoteState(RemoteState.ERROR)
+                _currentDevice.value?.let { handleDisconnection(it) }
             }
 
             msg.remote_ime_key_inject != null -> {
@@ -247,8 +295,9 @@ class TvRemoteManagerImpl(
     }
 
     override fun sendKey(keyCode: Int, direction: Direction) {
-        if (_remoteState.value != RemoteState.READY) {
-            TvLogger.w(TvLogger.TAG_REMOTE, "Cannot send key $keyCode: remoteState is ${_remoteState.value}, expected READY")
+        if (transport?.isConnected != true) {
+            TvLogger.w(TvLogger.TAG_REMOTE, "Cannot send key $keyCode: transport not connected, reconnecting...")
+            reconnectIfDisconnected()
             return
         }
 
@@ -263,6 +312,7 @@ class TvRemoteManagerImpl(
                 sendRemoteMessage(keyMsg)
             } catch (e: Exception) {
                 TvLogger.e(TvLogger.TAG_REMOTE, "Failed to send key $keyName ($keyCode): ${e.message}", e)
+                _currentDevice.value?.let { handleDisconnection(it) }
             }
         }
     }
@@ -272,8 +322,9 @@ class TvRemoteManagerImpl(
     }
 
     override fun sendImeTextWithFallback(text: String, useKeyCodesFallback: Boolean) {
-        if (_remoteState.value != RemoteState.READY) {
-            TvLogger.w(TvLogger.TAG_REMOTE, "Cannot send IME text: remoteState is ${_remoteState.value}, expected READY")
+        if (transport?.isConnected != true) {
+            TvLogger.w(TvLogger.TAG_REMOTE, "Cannot send IME text: transport not connected, reconnecting...")
+            reconnectIfDisconnected()
             return
         }
 
@@ -301,6 +352,7 @@ class TvRemoteManagerImpl(
                 sendRemoteMessage(imeMsg)
             } catch (e: Exception) {
                 TvLogger.e(TvLogger.TAG_REMOTE, "Failed to send IME text '$text': ${e.message}", e)
+                _currentDevice.value?.let { handleDisconnection(it) }
             }
         }
     }
@@ -315,8 +367,9 @@ class TvRemoteManagerImpl(
     }
 
     override fun launchAppLink(appLink: String) {
-        if (_remoteState.value != RemoteState.READY) {
-            TvLogger.w(TvLogger.TAG_REMOTE, "Cannot launch app link '$appLink': remoteState is ${_remoteState.value}, expected READY")
+        if (transport?.isConnected != true) {
+            TvLogger.w(TvLogger.TAG_REMOTE, "Cannot launch app link '$appLink': transport not connected, reconnecting...")
+            reconnectIfDisconnected()
             return
         }
 
@@ -331,7 +384,16 @@ class TvRemoteManagerImpl(
                 TvLogger.i(TvLogger.TAG_REMOTE, "[APP_LAUNCH_SUCCESS] Sent App Link Launch Request via protocol for: $appLink")
             } catch (e: Exception) {
                 TvLogger.e(TvLogger.TAG_REMOTE, "[APP_LAUNCH_FAILURE] Failed to launch app link '$appLink': ${e.message}", e)
+                _currentDevice.value?.let { handleDisconnection(it) }
             }
+        }
+    }
+
+    override fun reconnectIfDisconnected() {
+        val dev = _currentDevice.value ?: credentialStore.getSavedDevices().firstOrNull()
+        if (dev != null && _connectionState.value !is ConnectionState.Ready && _connectionState.value !is ConnectionState.Connecting) {
+            TvLogger.i(TvLogger.TAG_REMOTE, "reconnectIfDisconnected: Reconnecting to ${dev.name} (${dev.host})")
+            connect(dev)
         }
     }
 
@@ -344,7 +406,7 @@ class TvRemoteManagerImpl(
     private fun scheduleReconnect(device: TvDevice, retryCount: Int) {
         reconnectJob?.cancel()
         reconnectJob = scope.launch {
-            val delayMs = (1000L * (1 shl (retryCount - 1))).coerceAtMost(8000L)
+            val delayMs = (1000L * (1 shl (retryCount - 1))).coerceAtMost(15000L)
             TvLogger.i(TvLogger.TAG_REMOTE, "Paired — reconnecting to TV... (Attempt $retryCount in ${delayMs}ms)")
             _connectionState.value = ConnectionState.Reconnecting(attempt = retryCount, nextDelayMs = delayMs)
 
@@ -357,6 +419,7 @@ class TvRemoteManagerImpl(
         reconnectJob?.cancel()
         connectionJob?.cancel()
         readLoopJob?.cancel()
+        keepAliveJob?.cancel()
         cleanup()
 
         updateRemoteState(RemoteState.DISCONNECTED)
@@ -371,6 +434,8 @@ class TvRemoteManagerImpl(
     }
 
     private fun cleanup() {
+        keepAliveJob?.cancel()
+        keepAliveJob = null
         try {
             transport?.close()
         } catch (_: Exception) {}

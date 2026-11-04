@@ -16,6 +16,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.gala.motetv.core.logging.TvLogger
 import com.gala.motetv.core.model.ConnectionState
@@ -80,9 +81,10 @@ class MainActivity : ComponentActivity() {
         authManager = AuthManager(applicationContext)
 
         networkMonitor.startMonitoring {
-            TvLogger.i(TvLogger.TAG_DISCOVERY, "Network changed, triggering auto-discovery")
+            TvLogger.i(TvLogger.TAG_DISCOVERY, "Network changed, triggering auto-discovery and reconnect")
             discoveryManager.stopDiscovery()
             discoveryManager.startDiscovery()
+            remoteManager.reconnectIfDisconnected()
         }
 
         // Auto-start discovery on launch
@@ -107,6 +109,12 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Seamlessly reconnect remote if connection dropped while app was backgrounded or screen was off
+        remoteManager.reconnectIfDisconnected()
     }
 
     override fun onDestroy() {
@@ -156,11 +164,18 @@ fun MainAppHost(
     val castSessionState by castController.sessionState.collectAsStateWithLifecycle()
     val imeActive by remoteManager.imeActive.collectAsStateWithLifecycle()
     val lastImeText by remoteManager.lastImeText.collectAsStateWithLifecycle()
+    val context = LocalContext.current
 
     val mediaPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri ->
         if (uri != null) {
+            try {
+                context.contentResolver.takePersistableUriPermission(
+                    uri,
+                    android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            } catch (_: Exception) {}
             castController.onMediaFilePicked(uri)
         }
     }
@@ -173,6 +188,7 @@ fun MainAppHost(
             credentialStore.saveDevice(pairedDev)
             savedDevices = credentialStore.getSavedDevices()
             remoteManager.connect(pairedDev)
+            displayMode = MainDisplayMode.TABS
         }
     }
 
@@ -201,6 +217,7 @@ fun MainAppHost(
         savedDevices = credentialStore.getSavedDevices()
         if (credentialStore.isDevicePaired(dev.id)) {
             remoteManager.connect(dev)
+            displayMode = MainDisplayMode.TABS
         } else {
             pairingManager.startPairing(dev)
         }
