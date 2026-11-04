@@ -21,8 +21,14 @@ class NetworkMonitor(context: Context) {
     val isWifi: StateFlow<Boolean> = _isWifi.asStateFlow()
 
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
+    private var lastActiveNetwork: Network? = null
+    private var lastCallbackTimeMs: Long = 0L
 
-    fun startMonitoring(onNetworkChanged: () -> Unit = {}) {
+    fun startMonitoring(
+        onNetworkAvailable: (isWifi: Boolean) -> Unit = {},
+        onNetworkLost: () -> Unit = {},
+        onNetworkChanged: () -> Unit = {}
+    ) {
         val manager = connectivityManager ?: return
 
         updateCurrentState(manager)
@@ -33,20 +39,40 @@ class NetworkMonitor(context: Context) {
 
         val callback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
-                TvLogger.i(TvLogger.TAG_GENERAL, "Network became available")
+                val now = System.currentTimeMillis()
+                // Debounce rapid callbacks (500ms) unless the active network physically changed
+                val isSameNetwork = network == lastActiveNetwork
+                if (isSameNetwork && (now - lastCallbackTimeMs < 500)) {
+                    return
+                }
+                lastCallbackTimeMs = now
+                lastActiveNetwork = network
+
                 updateCurrentState(manager)
+                val wifi = _isWifi.value
+                TvLogger.i(TvLogger.TAG_GENERAL, "Network became available (Wi-Fi=$wifi, netId=$network)")
+                onNetworkAvailable(wifi)
                 onNetworkChanged()
             }
 
             override fun onLost(network: Network) {
-                TvLogger.w(TvLogger.TAG_GENERAL, "Network lost")
-                updateCurrentState(manager)
-                onNetworkChanged()
+                val wasActive = (network == lastActiveNetwork) || (manager.activeNetwork == null)
+                TvLogger.w(TvLogger.TAG_GENERAL, "Network lost: $network (wasActive=$wasActive)")
+                if (wasActive) {
+                    lastActiveNetwork = null
+                    updateCurrentState(manager)
+                    onNetworkLost()
+                    onNetworkChanged()
+                } else {
+                    updateCurrentState(manager)
+                }
             }
 
             override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
                 val hasWifi = networkCapabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+                val hasInternet = networkCapabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
                 _isWifi.value = hasWifi
+                _isConnected.value = hasInternet
             }
         }
 
@@ -71,6 +97,7 @@ class NetworkMonitor(context: Context) {
 
     private fun updateCurrentState(manager: ConnectivityManager) {
         val activeNetwork = manager.activeNetwork
+        lastActiveNetwork = activeNetwork
         val capabilities = activeNetwork?.let { manager.getNetworkCapabilities(it) }
         val connected = capabilities != null && capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
         val wifi = capabilities != null && capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)

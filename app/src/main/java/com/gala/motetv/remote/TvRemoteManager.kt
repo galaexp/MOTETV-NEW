@@ -4,6 +4,7 @@ import com.gala.motetv.core.model.ConnectionState
 import com.gala.motetv.core.model.RemoteButton
 import com.gala.motetv.core.model.TvDevice
 import com.google.android.apps.tv.remote.protocol.Direction
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
 interface TvRemoteManager {
@@ -12,6 +13,7 @@ interface TvRemoteManager {
     val currentDevice: StateFlow<TvDevice?>
     val imeActive: StateFlow<Boolean>
     val lastImeText: StateFlow<String>
+    val connectionDiagnostics: StateFlow<ConnectionDiagnostics>
 
     fun connect(device: TvDevice)
     fun disconnect()
@@ -24,4 +26,7 @@ interface TvRemoteManager {
     fun sendChar(char: Char)
     fun launchAppLink(appLink: String)
     fun reconnectIfDisconnected() {}
+    fun onNetworkLost() {}
+    fun onNetworkRestored() {}
+    fun onAppResume() {}
 }

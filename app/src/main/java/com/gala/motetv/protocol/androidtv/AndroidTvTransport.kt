@@ -19,7 +19,7 @@ class AndroidTvTransport(
     private val identity: TvIdentity,
     private val connectTimeoutMs: Int = DEFAULT_CONNECT_TIMEOUT_MS,
     private val readTimeoutMs: Int = DEFAULT_READ_TIMEOUT_MS
-) : Closeable {
+) : TvTransport {
 
     companion object {
         const val DEFAULT_CONNECT_TIMEOUT_MS = 6000
@@ -29,22 +29,22 @@ class AndroidTvTransport(
     private var sslSocket: SSLSocket? = null
     private var certManager: TvCertificateManager? = null
 
-    var serverCertificate: X509Certificate? = null
+    override var serverCertificate: X509Certificate? = null
         private set
 
-    var frameReader: ProtoFrameReader? = null
+    override var frameReader: ProtoFrameReader? = null
         private set
 
-    var frameWriter: ProtoFrameWriter? = null
+    override var frameWriter: ProtoFrameWriter? = null
         private set
 
-    val isConnected: Boolean
+    override val isConnected: Boolean
         get() = sslSocket?.isConnected == true && sslSocket?.isClosed == false
 
     /**
      * Connects via mutual TLS to the TV and performs the TLS handshake.
      */
-    suspend fun connect(): Unit = withContext(Dispatchers.IO) {
+    override suspend fun connect(): Unit = withContext(Dispatchers.IO) {
         try {
             TvLogger.i(TvLogger.TAG_TLS, "Initiating TLS connection to $host:$port...")
 
@@ -53,6 +53,7 @@ class AndroidTvTransport(
             val sslContext: SSLContext = cm.createSslContext(identity)
 
             val socket = sslContext.socketFactory.createSocket() as SSLSocket
+            sslSocket = socket
             socket.useClientMode = true
             socket.soTimeout = readTimeoutMs
             socket.keepAlive = true
@@ -90,7 +91,6 @@ class AndroidTvTransport(
                 "REMOTE TLS:\nhost=$host\nport=$port\nprotocol=${session.protocol}\ncipher=${session.cipherSuite}\npeerCertificate=${serverCertificate?.subjectDN?.name}\nfingerprint=$fingerprint"
             )
 
-            sslSocket = socket
             frameReader = ProtoFrameReader(socket.inputStream)
             frameWriter = ProtoFrameWriter(socket.outputStream)
 

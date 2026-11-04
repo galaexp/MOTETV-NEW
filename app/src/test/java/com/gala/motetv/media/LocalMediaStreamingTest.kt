@@ -36,6 +36,8 @@ class LocalMediaStreamingTest {
         override val currentDevice: StateFlow<TvDevice?> = MutableStateFlow(null)
         override val imeActive: StateFlow<Boolean> = MutableStateFlow(false)
         override val lastImeText: StateFlow<String> = MutableStateFlow("")
+        override val connectionDiagnostics: StateFlow<com.gala.motetv.remote.ConnectionDiagnostics> =
+            MutableStateFlow(com.gala.motetv.remote.ConnectionDiagnostics())
 
         var lastLaunchedAppLink: String? = null
         var lastKeySent: Int? = null

@@ -49,6 +49,7 @@ fun DiagnosticsScreen(
     onBack: () -> Unit,
     onReconnect: () -> Unit,
     onOpenPairing: () -> Unit,
+    connectionDiagnostics: com.gala.motetv.remote.ConnectionDiagnostics? = null,
     modifier: Modifier = Modifier
 ) {
     BackHandler { onBack() }
@@ -62,12 +63,12 @@ fun DiagnosticsScreen(
     fun runDiagnosticsCheck() {
         isRunning = true
         scope.launch {
-            report = diagnosticsService.runDiagnostics(currentDevice, connectionState)
+            report = diagnosticsService.runDiagnostics(currentDevice, connectionState, connectionDiagnostics)
             isRunning = false
         }
     }
 
-    LaunchedEffect(currentDevice, connectionState) {
+    LaunchedEffect(currentDevice, connectionState, connectionDiagnostics) {
         runDiagnosticsCheck()
     }
 

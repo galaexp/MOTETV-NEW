@@ -47,7 +47,8 @@ class DiagnosticsService(
 
     suspend fun runDiagnostics(
         selectedDevice: TvDevice?,
-        currentConnectionState: ConnectionState
+        currentConnectionState: ConnectionState,
+        connectionDiagnostics: com.gala.motetv.remote.ConnectionDiagnostics? = null
     ): DiagnosticReport = withContext(Dispatchers.IO) {
         val items = mutableListOf<DiagnosticItem>()
 
@@ -186,6 +187,45 @@ class DiagnosticsService(
                 suggestedAction = if (connStatus == DiagnosticStatus.PASSED) "Active" else "Tap Connect in header to initiate session"
             )
         )
+
+        // 6. Live Engine Telemetry (Session ID, Health Monitor, Queued Commands)
+        if (connectionDiagnostics != null) {
+            val diag = connectionDiagnostics
+            val sessionActive = diag.sessionId > 0 && currentConnectionState is ConnectionState.Ready
+            val timeSinceLastResponseSec = if (diag.lastReceivedResponseTimeMs > 0) {
+                (System.currentTimeMillis() - diag.lastReceivedResponseTimeMs) / 1000
+            } else -1L
+
+            items.add(
+                DiagnosticItem(
+                    id = "engine_session",
+                    name = "Active Engine Session",
+                    status = if (sessionActive) DiagnosticStatus.PASSED else DiagnosticStatus.NOT_AVAILABLE,
+                    explanation = "Session ID #${diag.sessionId} | Reconnect attempts: ${diag.reconnectAttemptCount} | Last reason: ${diag.lastDisconnectReason}",
+                    suggestedAction = if (sessionActive) "Session running" else "Will connect on demand"
+                )
+            )
+
+            items.add(
+                DiagnosticItem(
+                    id = "engine_health",
+                    name = "Connection Health & Ping",
+                    status = if (diag.isPingOutstanding) DiagnosticStatus.NOT_AVAILABLE else DiagnosticStatus.PASSED,
+                    explanation = "Last TV response: ${if (timeSinceLastResponseSec >= 0) "${timeSinceLastResponseSec}s ago" else "None"} | Outstanding ping: ${diag.isPingOutstanding}",
+                    suggestedAction = if (diag.isPingOutstanding) "Awaiting ping response from TV" else "TV heartbeats normal"
+                )
+            )
+
+            items.add(
+                DiagnosticItem(
+                    id = "command_queue",
+                    name = "Remote Command Queue",
+                    status = if (diag.pendingCommandCount == 0) DiagnosticStatus.PASSED else DiagnosticStatus.NOT_AVAILABLE,
+                    explanation = "Pending commands in buffer: ${diag.pendingCommandCount} (Max: 25, Expiry: 3.5s)",
+                    suggestedAction = if (diag.pendingCommandCount > 0) "Draining buffer to TV" else "Queue idle"
+                )
+            )
+        }
 
         val isHealthy = items.none { it.status == DiagnosticStatus.FAILED }
         DiagnosticReport(items = items, isOverallHealthy = isHealthy)

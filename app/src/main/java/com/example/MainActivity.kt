@@ -80,12 +80,18 @@ class MainActivity : ComponentActivity() {
         networkMonitor = NetworkMonitor(applicationContext)
         authManager = AuthManager(applicationContext)
 
-        networkMonitor.startMonitoring {
-            TvLogger.i(TvLogger.TAG_DISCOVERY, "Network changed, triggering auto-discovery and reconnect")
-            discoveryManager.stopDiscovery()
-            discoveryManager.startDiscovery()
-            remoteManager.reconnectIfDisconnected()
-        }
+        networkMonitor.startMonitoring(
+            onNetworkAvailable = { isWifi ->
+                TvLogger.i(TvLogger.TAG_DISCOVERY, "Network available (isWifi=$isWifi), discovering and restoring connection if needed")
+                discoveryManager.stopDiscovery()
+                discoveryManager.startDiscovery()
+                remoteManager.onNetworkRestored()
+            },
+            onNetworkLost = {
+                TvLogger.w(TvLogger.TAG_DISCOVERY, "Active network lost, invalidating remote connection")
+                remoteManager.onNetworkLost()
+            }
+        )
 
         // Auto-start discovery on launch
         discoveryManager.startDiscovery()
@@ -113,8 +119,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        // Seamlessly reconnect remote if connection dropped while app was backgrounded or screen was off
-        remoteManager.reconnectIfDisconnected()
+        // Seamlessly reconnect remote only if connection dropped while app was backgrounded or screen was off
+        remoteManager.onAppResume()
     }
 
     override fun onDestroy() {
