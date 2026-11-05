@@ -28,6 +28,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.yield
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -102,7 +103,11 @@ class TvRemoteManagerImpl(
     private var lastReceivedFrameTimeMs: Long = 0L
     private var lastPingSentTimeMs: Long = 0L
     private var isPingOutstanding: Boolean = false
+    private var outstandingPingVal: Int = 0
     private val pingSeqCounter = AtomicInteger(1)
+
+    // Key hold tracking to prevent logical stuck keys on disconnects or releases
+    private val currentlyHeldKeyCodes = java.util.concurrent.ConcurrentHashMap.newKeySet<Int>()
 
     private var lastSuccessfulConnectTimeMs: Long = 0L
     private var lastDisconnectReason: String = "None"
@@ -127,7 +132,7 @@ class TvRemoteManagerImpl(
         cancelScheduledReconnect()
 
         connectionAttemptJob?.cancel()
-        connectionAttemptJob = scope.launch {
+        connectionAttemptJob = scope.launch(ioDispatcher) {
             performConnect(device, currentRetry = 0)
         }
     }
@@ -137,7 +142,7 @@ class TvRemoteManagerImpl(
         cancelScheduledReconnect()
         connectionAttemptJob?.cancel()
 
-        scope.launch {
+        scope.launch(ioDispatcher) {
             connectionMutex.withLock {
                 val sessionId = sessionCounter.incrementAndGet()
                 activeSessionId = sessionId
@@ -235,7 +240,7 @@ class TvRemoteManagerImpl(
         lastDisconnectReason = reason
         cancelScheduledReconnect()
 
-        reconnectJob = scope.launch {
+        reconnectJob = scope.launch(ioDispatcher) {
             val attempt = retryCount + 1
             if (!immediate && attempt > 0) {
                 val delayIndex = (attempt - 1).coerceAtMost(BACKOFF_DELAYS.size - 1)
@@ -396,6 +401,7 @@ class TvRemoteManagerImpl(
                     } catch (e: SocketTimeoutException) {
                         // Harmless idle timeout while socket is waiting for TV frames
                         if (activeSessionId != sessionId) break
+                        yield()
                     }
                 }
             } catch (e: Exception) {
@@ -444,9 +450,14 @@ class TvRemoteManagerImpl(
 
             msg.remote_ping_response != null -> {
                 val pongVal = msg.remote_ping_response.val1 ?: 0
-                TvLogger.d(TvLogger.TAG_REMOTE, "[$sessionId] REMOTE RX: PING_RESPONSE received (val1=$pongVal)")
-                isPingOutstanding = false
-                updateDiagnostics()
+                TvLogger.d(TvLogger.TAG_REMOTE, "[$sessionId] REMOTE RX: PING_RESPONSE received (val1=$pongVal, expected=$outstandingPingVal, isOutstanding=$isPingOutstanding)")
+                if (isPingOutstanding && pongVal == outstandingPingVal) {
+                    isPingOutstanding = false
+                    outstandingPingVal = 0
+                    updateDiagnostics()
+                } else {
+                    TvLogger.w(TvLogger.TAG_REMOTE, "[$sessionId] Ignoring mismatched or stale PING_RESPONSE (val1=$pongVal, expected=$outstandingPingVal)")
+                }
             }
 
             msg.remote_error != null -> {
@@ -471,7 +482,7 @@ class TvRemoteManagerImpl(
 
     private fun startHealthMonitor(sessionId: Long) {
         healthMonitorJob?.cancel()
-        healthMonitorJob = scope.launch(Dispatchers.IO) {
+        healthMonitorJob = scope.launch(ioDispatcher) {
             while (isActive && activeSessionId == sessionId && transport?.isConnected == true) {
                 delay(2000L)
                 if (activeSessionId != sessionId || _remoteState.value != RemoteState.READY) break
@@ -495,12 +506,15 @@ class TvRemoteManagerImpl(
                         )
                         lastPingSentTimeMs = now
                         isPingOutstanding = true
+                        outstandingPingVal = seq
                         updateDiagnostics()
 
                         try {
                             sendRemoteMessage(pingMsg, sessionId)
                         } catch (e: Exception) {
                             TvLogger.w(TvLogger.TAG_REMOTE, "[$sessionId] Health monitor: Failed to write ping: ${e.message}")
+                            isPingOutstanding = false
+                            outstandingPingVal = 0
                             requestReconnect(reason = "Failed to write ping: ${e.message}", immediate = true)
                             break
                         }
@@ -530,33 +544,18 @@ class TvRemoteManagerImpl(
 
     override fun sendKey(keyCode: Int, direction: Direction) {
         val keyName = AndroidTvKeyCodes.getKeyName(keyCode)
-        val isReady = _connectionState.value is ConnectionState.Ready &&
-                _remoteState.value == RemoteState.READY &&
-                transport?.isConnected == true
+        TvLogger.d(TvLogger.TAG_REMOTE, "sendKey called: $keyName ($keyCode, ${direction.name})")
 
-        if (isReady) {
-            val sessionId = activeSessionId
-            TvLogger.i(TvLogger.TAG_REMOTE, "[$sessionId] REMOTE TX: KEY_INJECT $keyName ($keyCode) ${direction.name}")
-            scope.launch(ioDispatcher) {
-                try {
-                    val keyMsg = RemoteMessage(
-                        remote_key_inject = RemoteKeyInject(key_code = keyCode, direction = direction)
-                    )
-                    sendRemoteMessage(keyMsg, sessionId)
-                } catch (e: Exception) {
-                    TvLogger.e(TvLogger.TAG_REMOTE, "[$sessionId] Failed to send key $keyName: ${e.message} (uncertain delivery)", e)
-                    requestReconnect(reason = "Key transmission failure: ${e.message}", immediate = true)
-                }
-            }
-        } else {
-            // Queue command temporarily
-            val cmd = QueuedRemoteCommand.KeyCommand(keyCode, direction)
-            val queued = commandQueue.enqueue(cmd)
-            updateDiagnostics()
-
-            TvLogger.i(TvLogger.TAG_REMOTE, "Queued key $keyName ($keyCode, ${direction.name}) while state is ${_connectionState.value::class.simpleName} (queued=$queued)")
-            reconnectIfDisconnected()
+        // Track key press state for START_LONG and END_LONG
+        when (direction) {
+            Direction.START_LONG -> currentlyHeldKeyCodes.add(keyCode)
+            Direction.END_LONG -> currentlyHeldKeyCodes.remove(keyCode)
+            Direction.SHORT -> currentlyHeldKeyCodes.remove(keyCode)
+            else -> {}
         }
+
+        val cmd = QueuedRemoteCommand.KeyCommand(keyCode, direction)
+        enqueueAndDispatchCommand(cmd)
     }
 
     override fun sendImeText(text: String) {
@@ -564,45 +563,22 @@ class TvRemoteManagerImpl(
     }
 
     override fun sendImeTextWithFallback(text: String, useKeyCodesFallback: Boolean) {
-        val isReady = _connectionState.value is ConnectionState.Ready &&
-                _remoteState.value == RemoteState.READY &&
-                transport?.isConnected == true
-
-        if (isReady) {
-            val sessionId = activeSessionId
-            if (useKeyCodesFallback) {
-                TvLogger.i(TvLogger.TAG_REMOTE, "[$sessionId] REMOTE TX: DIRECT_KEYCODES text='$text'")
-                scope.launch(ioDispatcher) {
-                    for (c in text) {
-                        val keyCode = AndroidTvKeyCodes.getKeyCodeForChar(c)
-                        if (keyCode != null) {
-                            sendKey(keyCode, Direction.SHORT)
-                            delay(35)
-                        }
+        if (useKeyCodesFallback) {
+            TvLogger.i(TvLogger.TAG_REMOTE, "REMOTE TX: DIRECT_KEYCODES text='$text'")
+            scope.launch(ioDispatcher) {
+                for (c in text) {
+                    val keyCode = AndroidTvKeyCodes.getKeyCodeForChar(c)
+                    if (keyCode != null) {
+                        sendKey(keyCode, Direction.SHORT)
+                        delay(35)
                     }
                 }
-                return
             }
-
-            TvLogger.i(TvLogger.TAG_REMOTE, "[$sessionId] REMOTE TX: IME_TEXT text='$text'")
-            scope.launch(ioDispatcher) {
-                try {
-                    val imeMsg = RemoteMessage(
-                        remote_ime_key_inject = RemoteImeKeyInject(app_info = 0, text = text)
-                    )
-                    sendRemoteMessage(imeMsg, sessionId)
-                } catch (e: Exception) {
-                    TvLogger.e(TvLogger.TAG_REMOTE, "[$sessionId] Failed to send IME text '$text': ${e.message}", e)
-                    requestReconnect(reason = "IME transmission failure: ${e.message}", immediate = true)
-                }
-            }
-        } else {
-            val cmd = QueuedRemoteCommand.ImeCommand(text)
-            commandQueue.enqueue(cmd)
-            updateDiagnostics()
-            TvLogger.i(TvLogger.TAG_REMOTE, "Queued IME text '$text' while state is ${_connectionState.value::class.simpleName}")
-            reconnectIfDisconnected()
+            return
         }
+
+        val cmd = QueuedRemoteCommand.ImeCommand(text)
+        enqueueAndDispatchCommand(cmd)
     }
 
     override fun sendChar(char: Char) {
@@ -615,81 +591,105 @@ class TvRemoteManagerImpl(
     }
 
     override fun launchAppLink(appLink: String) {
+        val cmd = QueuedRemoteCommand.AppLinkCommand(appLink)
+        enqueueAndDispatchCommand(cmd)
+    }
+
+    /**
+     * Unified, serialized command dispatch path.
+     * Enqueues the command into the bounded queue. If session is READY, asynchronously drains
+     * the queue through the serialized writer. If disconnected, triggers reconnection.
+     */
+    private fun enqueueAndDispatchCommand(command: QueuedRemoteCommand) {
+        val queued = commandQueue.enqueue(command)
+        updateDiagnostics()
+
         val isReady = _connectionState.value is ConnectionState.Ready &&
                 _remoteState.value == RemoteState.READY &&
                 transport?.isConnected == true
 
         if (isReady) {
             val sessionId = activeSessionId
-            TvLogger.i(TvLogger.TAG_REMOTE, "[$sessionId] REMOTE TX: APP_LINK_LAUNCH link='$appLink'")
             scope.launch(ioDispatcher) {
-                try {
-                    val appLinkMsg = RemoteMessage(
-                        remote_app_link_launch_request = RemoteAppLinkLaunchRequest(app_link = appLink)
-                    )
-                    sendRemoteMessage(appLinkMsg, sessionId)
-                    TvLogger.i(TvLogger.TAG_REMOTE, "[$sessionId] App link launch transmitted: $appLink")
-                } catch (e: Exception) {
-                    TvLogger.e(TvLogger.TAG_REMOTE, "[$sessionId] Failed to launch app link '$appLink': ${e.message}", e)
-                    requestReconnect(reason = "App link launch failure: ${e.message}", immediate = true)
+                val trans = transport
+                val writer = trans?.frameWriter
+                if (writer != null && activeSessionId == sessionId && _remoteState.value == RemoteState.READY) {
+                    drainCommandQueue(writer, sessionId)
+                } else if (!intentionalDisconnect) {
+                    reconnectIfDisconnected()
                 }
             }
-        } else {
-            val cmd = QueuedRemoteCommand.AppLinkCommand(appLink)
-            commandQueue.enqueue(cmd)
-            updateDiagnostics()
-            TvLogger.i(TvLogger.TAG_REMOTE, "Queued AppLink '$appLink' while state is ${_connectionState.value::class.simpleName}")
+        } else if (!intentionalDisconnect) {
             reconnectIfDisconnected()
         }
     }
 
+    /**
+     * Drains the command queue one-by-one under writeMutex lock.
+     * Each command is ONLY removed from the queue AFTER successful transmission.
+     * If write fails, the command remains in queue (or is discarded if expired)
+     * and delivery aborts safely without replaying unattempted commands.
+     */
     private suspend fun drainCommandQueue(writer: ProtoFrameWriter, sessionId: Long) {
-        val commands = commandQueue.drainAllValid()
-        if (commands.isEmpty()) return
-
-        TvLogger.i(TvLogger.TAG_REMOTE, "[$sessionId] Draining ${commands.size} queued commands in original order...")
-        for (cmd in commands) {
-            if (activeSessionId != sessionId || _remoteState.value != RemoteState.READY) {
-                TvLogger.w(TvLogger.TAG_REMOTE, "[$sessionId] Queue draining aborted: session no longer active")
-                break
-            }
-            if (cmd.isExpired) {
-                TvLogger.d(TvLogger.TAG_REMOTE, "[$sessionId] Discarding expired command from queue (id=${cmd.commandId})")
-                continue
-            }
-
-            try {
-                when (cmd) {
-                    is QueuedRemoteCommand.KeyCommand -> {
-                        val keyMsg = RemoteMessage(
-                            remote_key_inject = RemoteKeyInject(key_code = cmd.keyCode, direction = cmd.direction)
-                        )
-                        sendRemoteMessageDirect(writer, keyMsg, sessionId)
-                        TvLogger.i(TvLogger.TAG_REMOTE, "[$sessionId] Delivered queued key ${cmd.keyCode} (${cmd.direction.name})")
-                    }
-                    is QueuedRemoteCommand.ImeCommand -> {
-                        val imeMsg = RemoteMessage(
-                            remote_ime_key_inject = RemoteImeKeyInject(app_info = 0, text = cmd.text)
-                        )
-                        sendRemoteMessageDirect(writer, imeMsg, sessionId)
-                        TvLogger.i(TvLogger.TAG_REMOTE, "[$sessionId] Delivered queued IME text '${cmd.text}'")
-                    }
-                    is QueuedRemoteCommand.AppLinkCommand -> {
-                        val appMsg = RemoteMessage(
-                            remote_app_link_launch_request = RemoteAppLinkLaunchRequest(app_link = cmd.appLink)
-                        )
-                        sendRemoteMessageDirect(writer, appMsg, sessionId)
-                        TvLogger.i(TvLogger.TAG_REMOTE, "[$sessionId] Delivered queued AppLink '${cmd.appLink}'")
-                    }
+        writeMutex.withLock {
+            while (true) {
+                if (activeSessionId != sessionId || _remoteState.value != RemoteState.READY) {
+                    TvLogger.w(TvLogger.TAG_REMOTE, "[$sessionId] Queue draining halted: session no longer ready")
+                    break
                 }
-                delay(20) // Brief pacing between queued key deliveries
-            } catch (e: Exception) {
-                TvLogger.e(TvLogger.TAG_REMOTE, "[$sessionId] Failed delivering queued command: ${e.message} (uncertain delivery)", e)
-                requestReconnect(reason = "Draining queue failed: ${e.message}", immediate = true)
-                break
+
+                val cmd = commandQueue.peekNextValid() ?: break
+
+                if (cmd.isExpired) {
+                    TvLogger.d(TvLogger.TAG_REMOTE, "[$sessionId] Discarding expired command (id=${cmd.commandId})")
+                    commandQueue.removeHead(cmd)
+                    continue
+                }
+
+                val message = when (cmd) {
+                    is QueuedRemoteCommand.KeyCommand -> RemoteMessage(
+                        remote_key_inject = RemoteKeyInject(key_code = cmd.keyCode, direction = cmd.direction)
+                    )
+                    is QueuedRemoteCommand.ImeCommand -> RemoteMessage(
+                        remote_ime_key_inject = RemoteImeKeyInject(app_info = 0, text = cmd.text)
+                    )
+                    is QueuedRemoteCommand.AppLinkCommand -> RemoteMessage(
+                        remote_app_link_launch_request = RemoteAppLinkLaunchRequest(app_link = cmd.appLink)
+                    )
+                }
+
+                try {
+                    val payload = message.encode()
+                    writer.writeFrame(payload)
+
+                    // Successfully transmitted: remove from queue head
+                    commandQueue.removeHead(cmd)
+                    lastReceivedFrameTimeMs = System.currentTimeMillis() // Outbound frame activity
+
+                    when (cmd) {
+                        is QueuedRemoteCommand.KeyCommand -> {
+                            val keyName = AndroidTvKeyCodes.getKeyName(cmd.keyCode)
+                            TvLogger.i(TvLogger.TAG_REMOTE, "[$sessionId] Delivered key $keyName (${cmd.keyCode}, ${cmd.direction.name})")
+                        }
+                        is QueuedRemoteCommand.ImeCommand -> {
+                            TvLogger.i(TvLogger.TAG_REMOTE, "[$sessionId] Delivered IME text '${cmd.text}'")
+                        }
+                        is QueuedRemoteCommand.AppLinkCommand -> {
+                            TvLogger.i(TvLogger.TAG_REMOTE, "[$sessionId] Delivered AppLink '${cmd.appLink}'")
+                        }
+                    }
+
+                    delay(15) // Pacing between queued commands
+                } catch (e: Exception) {
+                    TvLogger.e(TvLogger.TAG_REMOTE, "[$sessionId] Transmission failed for command ${cmd.commandId}: ${e.message}", e)
+                    // Do NOT remove from queue if delivery failed before transmission
+                    // However, if write threw midway, delivery status is uncertain
+                    requestReconnect(reason = "Command transmission failed: ${e.message}", immediate = true)
+                    break
+                }
             }
+            updateDiagnostics()
         }
-        updateDiagnostics()
     }
 
     private fun tearDownSessionInternal(closeTransport: Boolean) {
@@ -705,6 +705,8 @@ class TvRemoteManagerImpl(
         setActiveReceivedDeferred = null
 
         isPingOutstanding = false
+        outstandingPingVal = 0
+        currentlyHeldKeyCodes.clear()
 
         if (closeTransport) {
             try {
@@ -738,7 +740,9 @@ class TvRemoteManagerImpl(
             lastDisconnectReason = lastDisconnectReason,
             pendingCommandCount = commandQueue.size,
             isPingOutstanding = isPingOutstanding,
-            lastPingSentTimeMs = lastPingSentTimeMs
+            lastPingSentTimeMs = lastPingSentTimeMs,
+            droppedCommandCount = commandQueue.expiredCount,
+            evictedCommandCount = commandQueue.evictedCount
         )
     }
 }

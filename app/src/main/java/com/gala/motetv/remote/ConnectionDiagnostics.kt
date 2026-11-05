@@ -14,5 +14,7 @@ data class ConnectionDiagnostics(
     val lastDisconnectReason: String = "None",
     val pendingCommandCount: Int = 0,
     val isPingOutstanding: Boolean = false,
-    val lastPingSentTimeMs: Long = 0L
+    val lastPingSentTimeMs: Long = 0L,
+    val droppedCommandCount: Int = 0,
+    val evictedCommandCount: Int = 0
 )

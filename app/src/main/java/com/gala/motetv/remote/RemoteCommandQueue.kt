@@ -54,6 +54,14 @@ class RemoteCommandQueue(
     private val queue = ArrayDeque<QueuedRemoteCommand>()
     private val lock = Any()
 
+    private var _evictedCount = 0
+    val evictedCount: Int
+        get() = synchronized(lock) { _evictedCount }
+
+    private var _expiredCount = 0
+    val expiredCount: Int
+        get() = synchronized(lock) { _expiredCount }
+
     val size: Int
         get() = synchronized(lock) {
             purgeExpiredInternal()
@@ -62,24 +70,14 @@ class RemoteCommandQueue(
 
     /**
      * Enqueues a command. Discards expired entries and evicts the oldest entry if full.
+     * Long-press START_LONG commands replace earlier unreleased START_LONG commands for the same key.
+     * END_LONG commands are always accepted to ensure releases are never lost.
      */
     fun enqueue(command: QueuedRemoteCommand): Boolean = synchronized(lock) {
         purgeExpiredInternal()
 
         if (command is QueuedRemoteCommand.KeyCommand) {
             when (command.direction) {
-                Direction.END_LONG -> {
-                    // Check if a matching START_LONG is still in queue
-                    val hasStart = queue.any {
-                        it is QueuedRemoteCommand.KeyCommand &&
-                                it.keyCode == command.keyCode &&
-                                it.direction == Direction.START_LONG
-                    }
-                    if (!hasStart) {
-                        // Orphaned END_LONG with no queued START_LONG; don't queue
-                        return false
-                    }
-                }
                 Direction.START_LONG -> {
                     // Remove any older unfulfilled START_LONG for the same key
                     queue.removeAll {
@@ -88,25 +86,50 @@ class RemoteCommandQueue(
                                 it.direction == Direction.START_LONG
                     }
                 }
-                else -> { /* SHORT is normal */ }
+                else -> { /* SHORT and END_LONG are enqueued directly */ }
             }
         }
 
         while (queue.size >= maxCapacity) {
             queue.removeFirstOrNull()
+            _evictedCount++
         }
         queue.addLast(command)
         return true
     }
 
     /**
-     * Retrieves and removes all unexpired commands in their original order.
+     * Peeks at the next eligible, non-expired command without removing it from the queue.
+     * Returns null if queue is empty or all commands are expired.
      */
-    fun drainAllValid(): List<QueuedRemoteCommand> = synchronized(lock) {
+    fun peekNextValid(): QueuedRemoteCommand? = synchronized(lock) {
         purgeExpiredInternal()
-        val list = ArrayList<QueuedRemoteCommand>(queue)
-        queue.clear()
-        list
+        return queue.firstOrNull()
+    }
+
+    /**
+     * Removes the specific command from the head of the queue after confirmed transmission.
+     */
+    fun removeHead(command: QueuedRemoteCommand): Boolean = synchronized(lock) {
+        if (queue.isNotEmpty() && queue.first().commandId == command.commandId) {
+            queue.removeFirst()
+            return true
+        }
+        // Fallback: search and remove by commandId
+        val idx = queue.indexOfFirst { it.commandId == command.commandId }
+        if (idx >= 0) {
+            queue.removeAt(idx)
+            return true
+        }
+        return false
+    }
+
+    /**
+     * Retrieves all unexpired commands currently in queue without clearing.
+     */
+    fun getAllValid(): List<QueuedRemoteCommand> = synchronized(lock) {
+        purgeExpiredInternal()
+        ArrayList(queue)
     }
 
     /**
@@ -118,6 +141,13 @@ class RemoteCommandQueue(
 
     private fun purgeExpiredInternal() {
         val now = System.currentTimeMillis()
-        queue.removeAll { (now - it.createdAtMs) > it.maxAgeMs }
+        val it = queue.iterator()
+        while (it.hasNext()) {
+            val cmd = it.next()
+            if ((now - cmd.createdAtMs) > cmd.maxAgeMs) {
+                it.remove()
+                _expiredCount++
+            }
+        }
     }
 }

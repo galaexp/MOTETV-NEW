@@ -40,7 +40,15 @@ class NetworkMonitor(context: Context) {
         val callback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
                 val now = System.currentTimeMillis()
-                // Debounce rapid callbacks (500ms) unless the active network physically changed
+                val currentActive = manager.activeNetwork
+                // If this network is not the active system network, do not trigger reconnects for it
+                val isActiveNetwork = (network == currentActive) || (currentActive == null)
+                if (!isActiveNetwork) {
+                    TvLogger.d(TvLogger.TAG_GENERAL, "Secondary/unusable network became available ($network), ignoring for remote session")
+                    return
+                }
+
+                // Debounce rapid callbacks (500ms) for the same active network
                 val isSameNetwork = network == lastActiveNetwork
                 if (isSameNetwork && (now - lastCallbackTimeMs < 500)) {
                     return
@@ -50,7 +58,7 @@ class NetworkMonitor(context: Context) {
 
                 updateCurrentState(manager)
                 val wifi = _isWifi.value
-                TvLogger.i(TvLogger.TAG_GENERAL, "Network became available (Wi-Fi=$wifi, netId=$network)")
+                TvLogger.i(TvLogger.TAG_GENERAL, "Active network became available (Wi-Fi=$wifi, netId=$network)")
                 onNetworkAvailable(wifi)
                 onNetworkChanged()
             }
