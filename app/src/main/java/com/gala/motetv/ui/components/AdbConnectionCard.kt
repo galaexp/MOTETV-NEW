@@ -290,21 +290,34 @@ fun AdbConnectionCard(
                             )
 
                             val isPairingNow = pairingState is AdbPairingState.Pairing
-                            Button(
-                                onClick = {
-                                    val pairPort = pairingPortInput.toIntOrNull() ?: 0
-                                    scope.launch {
-                                        adbManager.pairWirelessDebugging(hostInput, pairPort, pairingCodeInput)
-                                    }
-                                },
-                                enabled = !isPairingNow && hostInput.isNotBlank() && pairingCodeInput.length == 6,
-                                colors = ButtonDefaults.buttonColors(containerColor = ElectricBluePrimary),
-                                shape = RoundedCornerShape(12.dp),
-                                modifier = Modifier
-                                    .defaultMinSize(minHeight = 48.dp)
-                                    .testTag("adb_pair_submit_button")
-                            ) {
-                                Text(if (isPairingNow) "..." else "Pair", style = Typography.labelLarge)
+                            if (isPairingNow) {
+                                OutlinedButton(
+                                    onClick = { adbManager.cancelWirelessPairing() },
+                                    shape = RoundedCornerShape(12.dp),
+                                    border = BorderStroke(1.dp, StatusErrorRed.copy(alpha = 0.6f)),
+                                    modifier = Modifier
+                                        .defaultMinSize(minHeight = 48.dp)
+                                        .testTag("adb_pair_cancel_button")
+                                ) {
+                                    Text("Cancel", style = Typography.labelLarge, color = StatusErrorRed)
+                                }
+                            } else {
+                                Button(
+                                    onClick = {
+                                        val pairPort = pairingPortInput.toIntOrNull() ?: 0
+                                        scope.launch {
+                                            adbManager.pairWirelessDebugging(hostInput, pairPort, pairingCodeInput)
+                                        }
+                                    },
+                                    enabled = hostInput.isNotBlank() && pairingCodeInput.length == 6,
+                                    colors = ButtonDefaults.buttonColors(containerColor = ElectricBluePrimary),
+                                    shape = RoundedCornerShape(12.dp),
+                                    modifier = Modifier
+                                        .defaultMinSize(minHeight = 48.dp)
+                                        .testTag("adb_pair_submit_button")
+                                ) {
+                                    Text("Pair", style = Typography.labelLarge)
+                                }
                             }
                         }
 

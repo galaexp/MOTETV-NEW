@@ -34,7 +34,7 @@ class DebloatRepository(
         return try {
             val json = serializeBackup(record).toString(2)
             memoryBackupJson = json
-            prefs?.edit()?.putString(KEY_LATEST_BACKUP, json)?.apply()
+            prefs?.edit()?.putString(KEY_LATEST_BACKUP, json)?.commit()
             Result.success(record)
         } catch (e: Exception) {
             Result.failure(e)
@@ -95,7 +95,7 @@ class DebloatRepository(
     private fun saveModifiedSet(set: Set<String>) {
         memoryModified.clear()
         memoryModified.addAll(set)
-        prefs?.edit()?.putStringSet(KEY_MODIFIED_PACKAGES, set.toSet())?.apply()
+        prefs?.edit()?.putStringSet(KEY_MODIFIED_PACKAGES, set.toSet())?.commit()
     }
 
     @Synchronized

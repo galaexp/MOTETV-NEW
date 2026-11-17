@@ -24,6 +24,7 @@ interface AdbConnectionManager {
     fun disconnect()
 
     suspend fun pairWirelessDebugging(host: String, pairingPort: Int, pairingCode: String): Result<String>
+    fun cancelWirelessPairing() {}
 
     suspend fun inspectTvDevice(): Result<TvDeviceInfo>
     suspend fun listAllPackages(): Result<List<String>>

@@ -1,28 +1,40 @@
 package com.gala.motetv.adb
 
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 import java.io.DataInputStream
 import java.io.EOFException
 import java.io.IOException
+import java.io.InputStream
+import java.io.OutputStream
 import java.io.PipedInputStream
 import java.io.PipedOutputStream
 import java.net.SocketTimeoutException
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.security.interfaces.RSAPublicKey
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
@@ -106,7 +118,7 @@ class AdbConnectionAndAuthTest {
     }
 
     @Test
-    fun nativeWirelessAdbPairingCompletesFullHandshakeAndDetectsWrongCode() = runTest {
+    fun nativeWirelessAdbPairingCompletesFullHandshakeAndDetectsIncorrectCode() = runTest {
         val store = AdbCredentialStore(null)
         val ekm = ByteArray(64) { (it + 11).toByte() }
 
@@ -173,7 +185,7 @@ class AdbConnectionAndAuthTest {
             assertEquals(NativeWirelessAdbPairing.PEER_INFO_TYPE_ADB_RSA_PUB_KEY, peerReceivedByTv[0])
         }
 
-        // Test 2: Wrong code triggers PAIRING_FAILURE cleanly when peer decrypt fails or closes
+        // Test 2: Incorrect pairing code triggers PAIRING_FAILURE via AdbConnectionManagerImpl and never reports success
         run {
             val clientToServerOut = PipedOutputStream()
             val serverIn = DataInputStream(PipedInputStream(clientToServerOut, 32 * 1024))
@@ -202,7 +214,6 @@ class AdbConnectionAndAuthTest {
                     init(Cipher.ENCRYPT_MODE, wrongAesKey, GCMParameterSpec(128, zeroNonce))
                 }
                 NativeWirelessAdbPairing.readPacket(serverIn, NativeWirelessAdbPairing.PACKET_TYPE_PEER_INFO)
-                // Respond encrypted with server's wrong key -> client AEADBadTagException!
                 val serverPeer = NativeWirelessAdbPairing.buildPeerInfoRsaKey("tv-guid\u0000".toByteArray())
                 serverOut.write(NativeWirelessAdbPairing.encodePacket(NativeWirelessAdbPairing.PACKET_TYPE_PEER_INFO, enc.doFinal(serverPeer)))
                 serverOut.flush()
@@ -219,12 +230,252 @@ class AdbConnectionAndAuthTest {
                     }
                 }
             }
-            val failRes = pairing.pair("192.168.1.90", 37111, "654321", store.getOrCreateAdbKeyPair())
+            val dispatcher = StandardTestDispatcher(testScheduler)
+            val manager = AdbConnectionManagerImpl(
+                context = null,
+                credentialStore = store,
+                ioDispatcher = dispatcher,
+                scope = TestScope(dispatcher),
+                wirelessPairingTransport = pairing
+            )
+            val failRes = manager.pairWirelessDebugging("192.168.1.90", 37111, "654321")
             executor.shutdownNow()
             assertTrue(failRes.isFailure)
-            val err = failRes.exceptionOrNull() as AdbPairingException
-            assertEquals(AdbDiagnosticCategory.PAIRING_FAILURE, err.category)
+            assertEquals(AdbDiagnosticCategory.PAIRING_FAILURE, manager.diagnosticCategory.value)
+            val st = manager.pairingState.value as AdbPairingState.Failed
+            assertEquals(AdbDiagnosticCategory.PAIRING_FAILURE, st.category)
         }
+    }
+
+    @Test
+    fun pairingSocketConnectTimeoutAndSocketReadTimeoutClassifyAsConnectionTimeout() = runTest {
+        val store = AdbCredentialStore(null)
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val ekm = ByteArray(64) { 3 }
+
+        // Default connect & read timeouts must be consistent
+        val defaultPairing = NativeWirelessAdbPairing(store)
+        assertEquals(defaultPairing.connectTimeoutMs, defaultPairing.readTimeoutMs)
+
+        // Scenario 1: Socket connect timeout
+        val connectTimeoutPairing = NativeWirelessAdbPairing(store) { _, _, _ ->
+            throw SocketTimeoutException("connect timed out")
+        }
+        val mgrConnectTimeout = AdbConnectionManagerImpl(
+            context = null,
+            credentialStore = store,
+            ioDispatcher = dispatcher,
+            scope = TestScope(dispatcher),
+            wirelessPairingTransport = connectTimeoutPairing
+        )
+        val connectRes = mgrConnectTimeout.pairWirelessDebugging("192.168.1.77", 37111, "654321")
+        assertTrue(connectRes.isFailure)
+        assertEquals(AdbDiagnosticCategory.CONNECTION_TIMEOUT, mgrConnectTimeout.diagnosticCategory.value)
+        assertEquals(
+            AdbDiagnosticCategory.CONNECTION_TIMEOUT,
+            (mgrConnectTimeout.pairingState.value as AdbPairingState.Failed).category
+        )
+
+        // Scenario 2: Socket read timeout (TV accepts connection, never answers readPacket)
+        val channelClosed = AtomicBoolean(false)
+        val readTimeoutPairing = NativeWirelessAdbPairing(store) { _, _, _ ->
+            object : TlsPairingChannel {
+                override val input = object : InputStream() {
+                    override fun read(): Int = throw SocketTimeoutException("Read timed out")
+                }
+                override val output = ByteArrayOutputStream()
+                override val exportedKeyingMaterial = ekm
+                override fun close() {
+                    channelClosed.set(true)
+                }
+            }
+        }
+        val mgrReadTimeout = AdbConnectionManagerImpl(
+            context = null,
+            credentialStore = store,
+            ioDispatcher = dispatcher,
+            scope = TestScope(dispatcher),
+            wirelessPairingTransport = readTimeoutPairing
+        )
+        val readRes = mgrReadTimeout.pairWirelessDebugging("192.168.1.77", 37111, "654321")
+        assertTrue(readRes.isFailure)
+        assertTrue("Channel must close on read timeout", channelClosed.get())
+        assertEquals(AdbDiagnosticCategory.CONNECTION_TIMEOUT, mgrReadTimeout.diagnosticCategory.value)
+        assertEquals(
+            AdbDiagnosticCategory.CONNECTION_TIMEOUT,
+            (mgrReadTimeout.pairingState.value as AdbPairingState.Failed).category
+        )
+    }
+
+    @Test
+    fun userCancellationDuringBlockingPairingClosesSocketImmediatelyWithoutLeavingReaderRunning() {
+        val store = AdbCredentialStore(null)
+        val ekm = ByteArray(64) { 5 }
+        val readEnteredLatch = CountDownLatch(1)
+        val socketClosedLatch = CountDownLatch(1)
+        val readerExitedLatch = CountDownLatch(1)
+
+        val blockingChannelPairing = NativeWirelessAdbPairing(store) { _, _, _ ->
+            val closed = AtomicBoolean(false)
+            val blockLock = Object()
+            object : TlsPairingChannel {
+                override val input = object : InputStream() {
+                    override fun read(): Int {
+                        readEnteredLatch.countDown()
+                        synchronized(blockLock) {
+                            while (!closed.get()) {
+                                blockLock.wait(5000L)
+                            }
+                        }
+                        readerExitedLatch.countDown()
+                        throw IOException("Socket closed")
+                    }
+                }
+                override val output = ByteArrayOutputStream()
+                override val exportedKeyingMaterial = ekm
+                override fun close() {
+                    closed.set(true)
+                    synchronized(blockLock) {
+                        blockLock.notifyAll()
+                    }
+                    socketClosedLatch.countDown()
+                }
+            }
+        }
+
+        val testScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.IO)
+        val manager = AdbConnectionManagerImpl(
+            context = null,
+            credentialStore = store,
+            ioDispatcher = Dispatchers.IO,
+            scope = testScope,
+            wirelessPairingTransport = blockingChannelPairing
+        )
+
+        val job = testScope.launch {
+            manager.pairWirelessDebugging("192.168.1.90", 37111, "654321")
+        }
+
+        try {
+            assertTrue("Pairing must enter socket read", readEnteredLatch.await(3, TimeUnit.SECONDS))
+            assertTrue(manager.pairingState.value is AdbPairingState.Pairing)
+
+            // User cancels active pairing!
+            manager.cancelWirelessPairing()
+
+            // Verify socket close was triggered immediately and reader was unblocked
+            assertTrue("Socket close must be called immediately upon cancellation", socketClosedLatch.await(3, TimeUnit.SECONDS))
+            assertTrue("Reader thread must exit promptly upon socket closure", readerExitedLatch.await(3, TimeUnit.SECONDS))
+
+            // Verify the job or coroutine cancellation completed
+            kotlinx.coroutines.runBlocking {
+                withTimeoutOrNull(3000L) { job.join() }
+            }
+            assertTrue("Pairing job must terminate after cancellation", job.isCompleted)
+            val finalState = manager.pairingState.value
+            assertTrue("Pairing state must not stay stuck in Pairing ($finalState)", finalState is AdbPairingState.Failed)
+            assertEquals(AdbDiagnosticCategory.PAIRING_FAILURE, manager.diagnosticCategory.value)
+        } finally {
+            testScope.coroutineContext[kotlinx.coroutines.Job]?.cancel()
+        }
+    }
+
+    @Test
+    fun secondPairingAttemptDoesNotInterfereWithActiveFirstAttempt() {
+        val store = AdbCredentialStore(null)
+        val firstEnteredLatch = CountDownLatch(1)
+        val allowFirstFinishLatch = CountDownLatch(1)
+        val firstClosed = AtomicBoolean(false)
+        val callsCount = AtomicInteger(0)
+
+        val transport = AdbPairingTransport { host, port, _, _ ->
+            val callNum = callsCount.incrementAndGet()
+            if (callNum == 1) {
+                firstEnteredLatch.countDown()
+                allowFirstFinishLatch.await(5, TimeUnit.SECONDS)
+                Result.success("Paired with TV ($host:$port)")
+            } else {
+                Result.success("Second attempt should never execute concurrently")
+            }
+        }
+
+        val testScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.IO)
+        val manager = AdbConnectionManagerImpl(
+            context = null,
+            credentialStore = store,
+            ioDispatcher = Dispatchers.IO,
+            scope = testScope,
+            wirelessPairingTransport = transport
+        )
+
+        try {
+            val firstDeferred = testScope.async {
+                manager.pairWirelessDebugging("192.168.1.90", 37111, "654321")
+            }
+            assertTrue(firstEnteredLatch.await(3, TimeUnit.SECONDS))
+
+            // Attempt 2 starts while Attempt 1 is still active -> MUST NOT cancel Attempt 1 or corrupt Pairing state!
+            val secondRes = kotlinx.coroutines.runBlocking {
+                manager.pairWirelessDebugging("192.168.1.90", 38999, "999888")
+            }
+            assertTrue("Second concurrent attempt must be rejected non-destructively", secondRes.isFailure)
+            assertEquals(1, callsCount.get())
+            assertFalse(firstClosed.get())
+            val activeState = manager.pairingState.value as AdbPairingState.Pairing
+            assertEquals(37111, activeState.pairingPort)
+
+            // Allow Attempt 1 to finish -> must complete normally as Paired!
+            allowFirstFinishLatch.countDown()
+            val firstRes = kotlinx.coroutines.runBlocking { firstDeferred.await() }
+            assertTrue("First attempt must finish cleanly: ${firstRes.exceptionOrNull()}", firstRes.isSuccess)
+            assertTrue(manager.pairingState.value is AdbPairingState.Paired)
+            assertEquals(AdbDiagnosticCategory.NONE, manager.diagnosticCategory.value)
+        } finally {
+            testScope.coroutineContext[kotlinx.coroutines.Job]?.cancel()
+        }
+    }
+
+    @Test
+    fun successfulPairingFollowedByConnectOnSeparateConnectPortSucceeds() = runTest {
+        val store = AdbCredentialStore(null)
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val scope = TestScope(dispatcher)
+        val connectedPorts = mutableListOf<Int>()
+
+        val manager = AdbConnectionManagerImpl(
+            context = null,
+            credentialStore = store,
+            ioDispatcher = dispatcher,
+            scope = scope,
+            wirelessPairingTransport = AdbPairingTransport { host, pairingPort, code, _ ->
+                assertEquals(37111, pairingPort)
+                assertEquals("654321", code)
+                Result.success("Paired with TV ($host)")
+            },
+            sessionFactory = { _, port, mode, _ ->
+                connectedPorts.add(port)
+                assertEquals(AdbConnectionMode.WIRELESS_DEBUGGING_TLS, mode)
+                FakeAdbSession(
+                    banner = "device::ro.product.model=MiTV-AESP0;",
+                    propsStdout = "MFG=Xiaomi\nMOD=MiTV-AESP0\nDEV=aquaman\nBRD=aquaman\nREL=9\nSDK=28",
+                    homeStdout = "com.google.android.tvlauncher/.MainActivity"
+                )
+            }
+        )
+
+        val pairRes = manager.pairWirelessDebugging("192.168.1.90", 37111, "654321")
+        assertTrue(pairRes.isSuccess)
+        assertTrue(manager.pairingState.value is AdbPairingState.Paired)
+
+        // Now connect using the SEPARATE Wireless Debugging Connect port (NOT the pairing port!)
+        manager.connect("192.168.1.90", 41555, AdbConnectionMode.WIRELESS_DEBUGGING_TLS)
+        advanceUntilIdle()
+
+        assertEquals(listOf(41555), connectedPorts)
+        val conn = manager.connectionState.value as AdbConnectionState.Connected
+        assertEquals(41555, conn.port)
+        assertEquals(AdbConnectionMode.WIRELESS_DEBUGGING_TLS, conn.mode)
+        assertEquals(41555, store.getSavedEndpoint()?.port)
     }
 
     @Test

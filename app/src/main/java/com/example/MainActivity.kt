@@ -55,6 +55,7 @@ import com.gala.motetv.adb.AdbCredentialStore
 import com.gala.motetv.debloat.DebloatManager
 import com.gala.motetv.debloat.DebloatRepository
 import com.gala.motetv.debloat.TvPackageScanner
+import com.gala.motetv.debloat.TvRecoveryCoordinator
 import com.gala.motetv.tvhome.CleanYourTvLauncherManager
 import com.gala.motetv.tvhome.CleanYourTvThemeManager
 import com.gala.motetv.ui.screens.TvDebloatScreen
@@ -83,6 +84,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var debloatManager: DebloatManager
     private lateinit var cleanYourTvLauncherManager: CleanYourTvLauncherManager
     private lateinit var cleanYourTvThemeManager: CleanYourTvThemeManager
+    private lateinit var tvRecoveryCoordinator: TvRecoveryCoordinator
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -105,6 +107,7 @@ class MainActivity : ComponentActivity() {
         debloatManager = DebloatManager(adbConnectionManager, scanner, debloatRepository)
         cleanYourTvLauncherManager = CleanYourTvLauncherManager(applicationContext, adbConnectionManager)
         cleanYourTvThemeManager = CleanYourTvThemeManager(adbConnectionManager)
+        tvRecoveryCoordinator = TvRecoveryCoordinator(debloatManager, cleanYourTvLauncherManager)
 
         networkMonitor.startMonitoring(
             onNetworkAvailable = { isWifi ->
@@ -140,7 +143,8 @@ class MainActivity : ComponentActivity() {
                         adbConnectionManager = adbConnectionManager,
                         debloatManager = debloatManager,
                         cleanYourTvLauncherManager = cleanYourTvLauncherManager,
-                        cleanYourTvThemeManager = cleanYourTvThemeManager
+                        cleanYourTvThemeManager = cleanYourTvThemeManager,
+                        tvRecoveryCoordinator = tvRecoveryCoordinator
                     )
                 }
             }
@@ -180,7 +184,8 @@ fun MainAppHost(
     adbConnectionManager: AdbConnectionManagerImpl,
     debloatManager: DebloatManager,
     cleanYourTvLauncherManager: CleanYourTvLauncherManager,
-    cleanYourTvThemeManager: CleanYourTvThemeManager
+    cleanYourTvThemeManager: CleanYourTvThemeManager,
+    tvRecoveryCoordinator: TvRecoveryCoordinator
 ) {
     var displayMode by remember { mutableStateOf(MainDisplayMode.TABS) }
     var selectedTab by remember { mutableStateOf(NavTab.REMOTE) }
@@ -388,6 +393,10 @@ fun MainAppHost(
 
                         NavTab.SETTINGS -> {
                             val modifiedPkgs by debloatManager.modifiedPackages.collectAsStateWithLifecycle()
+                            val latestBackup by debloatManager.latestBackup.collectAsStateWithLifecycle()
+                            val persistedOrigHome = tvHomeLauncherStatus.originalHomePackage
+                                ?: latestBackup?.originalHomePackage
+                                ?: tvRecoveryCoordinator.resolvePersistedOriginalHomePackage()
                             SettingsScreen(
                                 currentDevice = targetDevice,
                                 connectionState = connectionState,
@@ -428,20 +437,9 @@ fun MainAppHost(
                                 },
                                 adbConnectedHost = (adbState as? AdbConnectionState.Connected)?.let { "${it.host}:${it.port}" },
                                 modifiedPackagesCount = modifiedPkgs.size,
-                                originalHomePackage = tvHomeLauncherStatus.originalHomePackage,
+                                originalHomePackage = persistedOrigHome,
                                 onRunTvRecovery = {
-                                    val pkgRes = debloatManager.restoreAllModifiedByMoteTv()
-                                    val hasOrigHome = !cleanYourTvLauncherManager.launcherStatus.value.originalHomePackage.isNullOrBlank()
-                                    val homeRes = if (hasOrigHome) cleanYourTvLauncherManager.restoreOriginalHomeLauncher() else null
-                                    when {
-                                        pkgRes.isFailure -> Result.failure(pkgRes.exceptionOrNull()!!)
-                                        homeRes?.isFailure == true -> Result.failure(homeRes.exceptionOrNull()!!)
-                                        else -> {
-                                            val count = pkgRes.getOrNull()?.size ?: 0
-                                            val homeMsg = homeRes?.getOrNull()?.currentHomePackage?.let { " Original HOME '$it' active." } ?: ""
-                                            Result.success("Recovery verified: restored $count MoteTV-disabled package(s).$homeMsg")
-                                        }
-                                    }
+                                    tvRecoveryCoordinator.recoverTv().map { it.formatSummary() }
                                 }
                             )
                         }

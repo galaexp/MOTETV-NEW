@@ -43,9 +43,9 @@ class AdbConnectionManagerImpl(
             onAwaitingTvAuthorization = onAwaiting
         ).apply { connectAndAuthenticate() }
     },
-    private val wirelessPairingTransport: AdbPairingTransport? = defaultPairingTransport(credentialStore),
+    private val wirelessPairingTransport: AdbPairingTransport? = defaultPairingTransport(credentialStore, 10_000L),
     private val commandTimeoutMs: Long = 15_000L,
-    private val pairingTimeoutMs: Long = 12_000L
+    private val pairingTimeoutMs: Long = 10_000L
 ) : AdbConnectionManager {
 
     companion object {
@@ -55,9 +55,17 @@ class AdbConnectionManagerImpl(
         private val COMPONENT_NAME_REGEX = Regex("^[a-zA-Z0-9._/$]+$")
         private val SAFE_PATH_REGEX = Regex("^/sdcard/Android/data/com\\.gathin\\.tvhome/files/[a-zA-Z0-9._/-]+$")
 
-        fun defaultPairingTransport(credentialStore: AdbCredentialStore): AdbPairingTransport? {
+        fun defaultPairingTransport(
+            credentialStore: AdbCredentialStore,
+            pairingTimeoutMs: Long = NativeWirelessAdbPairing.DEFAULT_TIMEOUT_MS.toLong()
+        ): AdbPairingTransport? {
             return if (NativeWirelessAdbPairing.isNativeSupportedOnDevice()) {
-                NativeWirelessAdbPairing(credentialStore)
+                val alignedTimeoutMs = pairingTimeoutMs.coerceIn(1_000L, Int.MAX_VALUE.toLong()).toInt()
+                NativeWirelessAdbPairing(
+                    credentialStore = credentialStore,
+                    connectTimeoutMs = alignedTimeoutMs,
+                    readTimeoutMs = alignedTimeoutMs
+                )
             } else {
                 null
             }
@@ -331,97 +339,127 @@ class AdbConnectionManagerImpl(
         }
     }
 
+    override fun cancelWirelessPairing() {
+        (wirelessPairingTransport as? NativeWirelessAdbPairing)?.cancelCurrentPairing()
+        val activeJob = synchronized(jobLock) {
+            val j = pairingJob
+            pairingJob = null
+            j
+        }
+        if (activeJob != null && activeJob.isActive) {
+            activeJob.cancel(CancellationException("Wireless Debugging pairing cancelled by user"))
+        } else if (_pairingState.value is AdbPairingState.Pairing) {
+            _diagnosticCategory.value = AdbDiagnosticCategory.PAIRING_FAILURE
+            _pairingState.value = AdbPairingState.Failed(
+                AdbDiagnosticCategory.PAIRING_FAILURE,
+                "Wireless Debugging pairing cancelled."
+            )
+            _lastDiagnosticDetail.value = "Pairing Failure: Wireless Debugging pairing cancelled."
+        }
+    }
+
     override suspend fun pairWirelessDebugging(
         host: String,
         pairingPort: Int,
         pairingCode: String
     ): Result<String> = withContext(ioDispatcher) {
-        val transport = wirelessPairingTransport
-        if (transport == null) {
-            val msg = pairingCapability.explanation
-            _diagnosticCategory.value = AdbDiagnosticCategory.PAIRING_FAILURE
-            _pairingState.value = AdbPairingState.Failed(AdbDiagnosticCategory.PAIRING_FAILURE, msg)
-            _lastDiagnosticDetail.value = msg
-            return@withContext Result.failure(UnsupportedOperationException(msg))
-        }
-
         val cleanHost = host.trim()
         val cleanCode = pairingCode.trim()
-        if (cleanHost.isBlank() || pairingPort !in 1..65535) {
-            val err = IllegalArgumentException("Enter a valid TV IP address and pairing port (1–65535).")
-            _diagnosticCategory.value = AdbDiagnosticCategory.PAIRING_FAILURE
-            _pairingState.value = AdbPairingState.Failed(AdbDiagnosticCategory.PAIRING_FAILURE, err.message!!)
-            _lastDiagnosticDetail.value = err.message!!
-            return@withContext Result.failure(err)
-        }
-        if (cleanCode.length != 6 || !cleanCode.all { it.isDigit() }) {
-            val err = IllegalArgumentException("Pairing code must be a 6-digit number.")
-            _diagnosticCategory.value = AdbDiagnosticCategory.PAIRING_FAILURE
-            _pairingState.value = AdbPairingState.Failed(AdbDiagnosticCategory.PAIRING_FAILURE, err.message!!)
-            _lastDiagnosticDetail.value = err.message!!
-            return@withContext Result.failure(err)
-        }
 
-        // Prevent overlapping pairing or connect jobs
-        val previousPairing: Job?
         synchronized(jobLock) {
-            previousPairing = pairingJob
-            previousPairing?.cancel()
-            connectJob?.cancel()
             pairingJob = coroutineContext[Job]
         }
 
-        pairingMutex.withLock {
+        // Non-interfering guard: if a pairing attempt is already active, reject immediately WITHOUT
+        // cancelling the active attempt, touching its socket, or altering its state/category.
+        if (!pairingMutex.tryLock()) {
+            return@withContext Result.failure(
+                AdbPairingException(
+                    AdbDiagnosticCategory.PAIRING_FAILURE,
+                    "Wireless Debugging pairing is already in progress. Wait for it to finish or cancel it first."
+                )
+            )
+        }
+
+        try {
+            val transport = wirelessPairingTransport
+            if (transport == null) {
+                val msg = pairingCapability.explanation
+                _diagnosticCategory.value = AdbDiagnosticCategory.PAIRING_FAILURE
+                _pairingState.value = AdbPairingState.Failed(AdbDiagnosticCategory.PAIRING_FAILURE, msg)
+                _lastDiagnosticDetail.value = msg
+                return@withContext Result.failure(UnsupportedOperationException(msg))
+            }
+
+            if (cleanHost.isBlank() || pairingPort !in 1..65535) {
+                val err = IllegalArgumentException("Enter a valid TV IP address and pairing port (1–65535).")
+                _diagnosticCategory.value = AdbDiagnosticCategory.PAIRING_FAILURE
+                _pairingState.value = AdbPairingState.Failed(AdbDiagnosticCategory.PAIRING_FAILURE, err.message!!)
+                _lastDiagnosticDetail.value = err.message!!
+                return@withContext Result.failure(err)
+            }
+            if (cleanCode.length != 6 || !cleanCode.all { it.isDigit() }) {
+                val err = IllegalArgumentException("Pairing code must be a 6-digit number.")
+                _diagnosticCategory.value = AdbDiagnosticCategory.PAIRING_FAILURE
+                _pairingState.value = AdbPairingState.Failed(AdbDiagnosticCategory.PAIRING_FAILURE, err.message!!)
+                _lastDiagnosticDetail.value = err.message!!
+                return@withContext Result.failure(err)
+            }
+
             _pairingState.value = AdbPairingState.Pairing(cleanHost, pairingPort)
             _diagnosticCategory.value = AdbDiagnosticCategory.NONE
             _lastDiagnosticDetail.value = "Pairing Wireless Debugging at $cleanHost:$pairingPort..."
 
-            try {
-                val res = withTimeout(pairingTimeoutMs) {
-                    transport.pair(cleanHost, pairingPort, cleanCode, credentialStore.getOrCreateAdbKeyPair())
-                }
-                res.onSuccess { detail ->
-                    _diagnosticCategory.value = AdbDiagnosticCategory.NONE
-                    _pairingState.value = AdbPairingState.Paired(cleanHost, detail)
-                    _lastDiagnosticDetail.value = detail
-                }.onFailure { err ->
-                    val (cat, msg) = classifyException(
-                        err, cleanHost, pairingPort, AdbConnectionMode.WIRELESS_DEBUGGING_TLS,
-                        defaultCat = AdbDiagnosticCategory.PAIRING_FAILURE
-                    )
-                    _diagnosticCategory.value = cat
-                    _pairingState.value = AdbPairingState.Failed(cat, msg)
-                    _lastDiagnosticDetail.value = "${cat.label}: $msg"
-                }
-                res
-            } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
+            val res = withTimeout(pairingTimeoutMs) {
+                transport.pair(cleanHost, pairingPort, cleanCode, credentialStore.getOrCreateAdbKeyPair())
+            }
+            res.onSuccess { detail ->
+                _diagnosticCategory.value = AdbDiagnosticCategory.NONE
+                _pairingState.value = AdbPairingState.Paired(cleanHost, detail)
+                _lastDiagnosticDetail.value = detail
+            }.onFailure { err ->
                 val (cat, msg) = classifyException(
-                    e, cleanHost, pairingPort, AdbConnectionMode.WIRELESS_DEBUGGING_TLS,
-                    defaultCat = AdbDiagnosticCategory.CONNECTION_TIMEOUT
-                )
-                _diagnosticCategory.value = cat
-                _pairingState.value = AdbPairingState.Failed(cat, msg)
-                _lastDiagnosticDetail.value = "${cat.label}: $msg"
-                Result.failure(AdbPairingException(cat, msg, e))
-            } catch (e: CancellationException) {
-                _lastDiagnosticDetail.value = "Wireless Debugging pairing cancelled"
-                throw e
-            } catch (e: Exception) {
-                val (cat, msg) = classifyException(
-                    e, cleanHost, pairingPort, AdbConnectionMode.WIRELESS_DEBUGGING_TLS,
+                    err, cleanHost, pairingPort, AdbConnectionMode.WIRELESS_DEBUGGING_TLS,
                     defaultCat = AdbDiagnosticCategory.PAIRING_FAILURE
                 )
                 _diagnosticCategory.value = cat
                 _pairingState.value = AdbPairingState.Failed(cat, msg)
                 _lastDiagnosticDetail.value = "${cat.label}: $msg"
-                Result.failure(AdbPairingException(cat, msg, e))
-            } finally {
-                synchronized(jobLock) {
-                    if (pairingJob === coroutineContext[Job]) {
-                        pairingJob = null
-                    }
+            }
+            res
+        } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
+            val (cat, msg) = classifyException(
+                e, cleanHost, pairingPort, AdbConnectionMode.WIRELESS_DEBUGGING_TLS,
+                defaultCat = AdbDiagnosticCategory.CONNECTION_TIMEOUT
+            )
+            _diagnosticCategory.value = cat
+            _pairingState.value = AdbPairingState.Failed(cat, msg)
+            _lastDiagnosticDetail.value = "${cat.label}: $msg"
+            Result.failure(AdbPairingException(cat, msg, e))
+        } catch (e: CancellationException) {
+            _diagnosticCategory.value = AdbDiagnosticCategory.PAIRING_FAILURE
+            _pairingState.value = AdbPairingState.Failed(
+                AdbDiagnosticCategory.PAIRING_FAILURE,
+                "Wireless Debugging pairing cancelled."
+            )
+            _lastDiagnosticDetail.value = "Pairing Failure: Wireless Debugging pairing cancelled."
+            throw e
+        } catch (e: Exception) {
+            val (cat, msg) = classifyException(
+                e, cleanHost, pairingPort, AdbConnectionMode.WIRELESS_DEBUGGING_TLS,
+                defaultCat = AdbDiagnosticCategory.PAIRING_FAILURE
+            )
+            _diagnosticCategory.value = cat
+            _pairingState.value = AdbPairingState.Failed(cat, msg)
+            _lastDiagnosticDetail.value = "${cat.label}: $msg"
+            Result.failure(AdbPairingException(cat, msg, e))
+        } finally {
+            synchronized(jobLock) {
+                if (pairingJob === coroutineContext[Job]) {
+                    pairingJob = null
                 }
             }
+            pairingMutex.unlock()
         }
     }
 

@@ -32,9 +32,41 @@ class CleanYourTvLauncherManager(
     private val _launcherStatus = MutableStateFlow(CleanYourTvLauncherStatus())
     val launcherStatus: StateFlow<CleanYourTvLauncherStatus> = _launcherStatus.asStateFlow()
 
+    init {
+        val (savedPkg, savedAct) = loadOriginalHome()
+        if (!savedPkg.isNullOrBlank()) {
+            _launcherStatus.value = _launcherStatus.value.copy(
+                originalHomePackage = savedPkg,
+                originalHomeActivity = savedAct
+            )
+        }
+    }
+
+    fun getPersistedOriginalHome(): Pair<String?, String?> = loadOriginalHome()
+
+    /**
+     * Seeds the persisted original HOME record from an external verified backup (e.g. DebloatBackupRecord)
+     * if no original HOME record was yet stored in launcher preferences.
+     */
+    fun seedOriginalHomeIfMissing(pkg: String?, activity: String?) {
+        val cleanPkg = pkg?.trim()?.ifBlank { null } ?: return
+        if (cleanPkg == CleanYourTvConstants.LAUNCHER_PACKAGE) return
+        val (existing, _) = loadOriginalHome()
+        if (existing.isNullOrBlank()) {
+            saveOriginalHome(cleanPkg, activity?.trim()?.ifBlank { null })
+            _launcherStatus.value = _launcherStatus.value.copy(
+                originalHomePackage = cleanPkg,
+                originalHomeActivity = activity?.trim()?.ifBlank { null }
+            )
+        }
+    }
+
     suspend fun refreshLauncherStatus(): Result<CleanYourTvLauncherStatus> {
         val devInfo = adbManager.inspectTvDevice().getOrElse { err ->
+            val (savedOrigPkg, savedOrigAct) = loadOriginalHome()
             _launcherStatus.value = _launcherStatus.value.copy(
+                originalHomePackage = savedOrigPkg,
+                originalHomeActivity = savedOrigAct,
                 statusDetail = "Unable to inspect TV HOME launcher: ${err.message}"
             )
             return Result.failure(err)
@@ -50,7 +82,7 @@ class CleanYourTvLauncherManager(
         val cleanActive = currentPkg == CleanYourTvConstants.LAUNCHER_PACKAGE
 
         // Preserve original non-CleanYourTV HOME for safe one-tap recovery
-        if (currentPkg != null && currentPkg != CleanYourTvConstants.LAUNCHER_PACKAGE) {
+        if (!currentPkg.isNullOrBlank() && currentPkg != CleanYourTvConstants.LAUNCHER_PACKAGE) {
             saveOriginalHome(currentPkg, currentAct)
         }
 
@@ -100,7 +132,7 @@ class CleanYourTvLauncherManager(
         }
 
         // Never disable stock launcher; record original HOME before switching
-        if (preflight.currentHomePackage != null && preflight.currentHomePackage != CleanYourTvConstants.LAUNCHER_PACKAGE) {
+        if (!preflight.currentHomePackage.isNullOrBlank() && preflight.currentHomePackage != CleanYourTvConstants.LAUNCHER_PACKAGE) {
             saveOriginalHome(preflight.currentHomePackage, preflight.currentHomeActivity)
         }
 
@@ -126,13 +158,38 @@ class CleanYourTvLauncherManager(
     }
 
     suspend fun restoreOriginalHomeLauncher(): Result<CleanYourTvLauncherStatus> {
-        val (origPkg, origAct) = loadOriginalHome()
-        if (origPkg.isNullOrBlank()) {
-            return Result.failure(IllegalStateException("No original HOME launcher record was captured yet."))
+        // Refresh current TV launcher state first when needed, while relying on persistent storage for the saved original HOME
+        val (persistedPkg, persistedAct) = loadOriginalHome()
+        val origPkg: String?
+        val origAct: String?
+        if (!persistedPkg.isNullOrBlank()) {
+            origPkg = persistedPkg
+            origAct = persistedAct
+        } else {
+            // Attempt a refresh in case TV already has a non-CleanYourTV HOME or saved status needs syncing
+            refreshLauncherStatus()
+            val (reloadedPkg, reloadedAct) = loadOriginalHome()
+            origPkg = reloadedPkg
+            origAct = reloadedAct
         }
 
-        // Ensure original launcher is enabled first (in case user disabled it elsewhere)
-        adbManager.enablePackage(origPkg)
+        if (origPkg.isNullOrBlank() || origPkg == CleanYourTvConstants.LAUNCHER_PACKAGE) {
+            return Result.failure(IllegalStateException("No valid original HOME launcher record exists in persistent storage."))
+        }
+
+        // Verify original launcher is enabled BEFORE attempting to set it as default HOME
+        val enableRes = adbManager.enablePackage(origPkg)
+        if (enableRes.isFailure) {
+            val err = enableRes.exceptionOrNull()!!
+            return Result.failure(IllegalStateException("Failed to enable original launcher '$origPkg' before setting HOME: ${err.message}", err))
+        }
+
+        val disabledAfterEnable = adbManager.listDisabledPackages().getOrElse { err ->
+            return Result.failure(IllegalStateException("Unable to verify enabled state of original launcher '$origPkg': ${err.message}", err))
+        }
+        if (disabledAfterEnable.contains(origPkg)) {
+            return Result.failure(IllegalStateException("Original launcher '$origPkg' remains disabled on TV; aborted HOME switch."))
+        }
 
         val targetComponent = origAct?.takeIf { it.contains('/') } ?: "$origPkg/.MainActivity"
         val setRes = adbManager.setDefaultHomeActivity(targetComponent)
@@ -145,17 +202,20 @@ class CleanYourTvLauncherManager(
         return if (verified.currentHomePackage == origPkg) {
             Result.success(verified)
         } else {
-            Result.failure(IllegalStateException("Restored command ran, but active HOME still reports '${verified.currentHomePackage}' instead of '$origPkg'."))
+            Result.failure(
+                IllegalStateException("Restored command ran, but active HOME still reports '${verified.currentHomePackage}' instead of '$origPkg'.")
+            )
         }
     }
 
     private fun saveOriginalHome(pkg: String, activity: String?) {
+        if (pkg.isBlank() || pkg == CleanYourTvConstants.LAUNCHER_PACKAGE) return
         memoryOrigPkg = pkg
         memoryOrigAct = activity
         prefs?.edit()
             ?.putString(KEY_ORIG_HOME_PKG, pkg)
             ?.putString(KEY_ORIG_HOME_ACT, activity ?: "")
-            ?.apply()
+            ?.commit()
     }
 
     private fun loadOriginalHome(): Pair<String?, String?> {
