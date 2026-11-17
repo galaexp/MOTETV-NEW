@@ -4,8 +4,10 @@ import com.gala.motetv.adb.AdbCommandResult
 import com.gala.motetv.adb.AdbConnectionManager
 import com.gala.motetv.adb.AdbConnectionMode
 import com.gala.motetv.adb.AdbConnectionState
+import com.gala.motetv.adb.AdbDiagnosticCategory
 import com.gala.motetv.adb.AdbEndpointConfig
 import com.gala.motetv.adb.AdbPairingCapability
+import com.gala.motetv.adb.AdbPairingState
 import com.gala.motetv.adb.DiscoveredAdbService
 import com.gala.motetv.adb.TvDeviceInfo
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -14,11 +16,14 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.IOException
 
 class TvPackageScannerAndSafetyTest {
 
     private val dummyAdbManager = object : AdbConnectionManager {
         override val connectionState: StateFlow<AdbConnectionState> = MutableStateFlow(AdbConnectionState.Disconnected)
+        override val pairingState: StateFlow<AdbPairingState> = MutableStateFlow(AdbPairingState.Idle)
+        override val diagnosticCategory: StateFlow<AdbDiagnosticCategory> = MutableStateFlow(AdbDiagnosticCategory.NONE)
         override val discoveredServices: StateFlow<List<DiscoveredAdbService>> = MutableStateFlow(emptyList())
         override val isDiscovering: StateFlow<Boolean> = MutableStateFlow(false)
         override val savedEndpoint: StateFlow<AdbEndpointConfig?> = MutableStateFlow(null)
@@ -28,7 +33,8 @@ class TvPackageScannerAndSafetyTest {
         override fun stopWirelessDiscovery() {}
         override fun connect(host: String, port: Int, mode: AdbConnectionMode) {}
         override fun disconnect() {}
-        override suspend fun pairWirelessDebugging(host: String, pairingPort: Int, pairingCode: String) = Result.failure<String>(UnsupportedOperationException())
+        override suspend fun pairWirelessDebugging(host: String, pairingPort: Int, pairingCode: String) =
+            Result.failure<String>(UnsupportedOperationException())
         override suspend fun inspectTvDevice() = Result.failure<TvDeviceInfo>(IllegalStateException())
         override suspend fun listAllPackages() = Result.success(emptyList<String>())
         override suspend fun listDisabledPackages() = Result.success(emptySet<String>())
@@ -36,8 +42,11 @@ class TvPackageScannerAndSafetyTest {
         override suspend fun enablePackage(packageName: String) = Result.success(AdbCommandResult(0, ""))
         override suspend fun launchHomeChooserOrOpenHome() = Result.success(AdbCommandResult(0, ""))
         override suspend fun setDefaultHomeActivity(componentName: String) = Result.success(AdbCommandResult(0, ""))
+        override suspend fun restartCleanYourTvLauncher() = Result.success(AdbCommandResult(0, ""))
         override suspend fun installApk(apkBytes: ByteArray) = Result.success(AdbCommandResult(0, ""))
         override suspend fun pushAppConfigFile(remotePath: String, content: ByteArray) = Result.success(AdbCommandResult(0, ""))
+        override suspend fun readRemoteFile(remotePath: String) = Result.failure<ByteArray>(IOException())
+        override suspend fun remoteFileExists(remotePath: String) = Result.success(false)
         override suspend fun ensureRemoteDirectory(remoteDir: String) = Result.success(AdbCommandResult(0, ""))
         override suspend fun removeRemoteFile(remotePath: String) = Result.success(AdbCommandResult(0, ""))
         override suspend fun checkFilePushSupported() = Result.success(true)
@@ -58,9 +67,11 @@ class TvPackageScannerAndSafetyTest {
     )
 
     @Test
-    fun xiaomiMiTvStickIssue884AndCorePackagesAreStrictlyBlocked() {
+    fun xiaomiMiTvStickIssue884AccessibilityInputRemoteAndCoreAreStrictlyBlocked() {
         val scanner = TvPackageScanner(dummyAdbManager, DebloatRepository(null))
         val packages = listOf(
+            "android",
+            "com.android.systemui",
             "com.google.android.permissioncontroller",
             "com.google.android.packageinstaller",
             "com.google.android.ext.services",
@@ -68,8 +79,11 @@ class TvPackageScannerAndSafetyTest {
             "com.google.android.modulemetadata",
             "com.google.android.overlay.modules.permissioncontroller",
             "com.google.android.tv.remote.service",
+            "com.google.android.marvin.talkback",
+            "com.google.android.inputmethod.latin",
             "com.android.vending",
             "com.google.android.gms",
+            "com.google.android.networkstack",
             "com.google.android.tvlauncher",
             "com.miui.tv.analytics",
             "com.mitv.tvhome.atv",
@@ -90,8 +104,10 @@ class TvPackageScannerAndSafetyTest {
 
         val byPkg = scan.packages.associateBy { it.packageName }
 
-        // Issue #884 & critical core services MUST be blocked
+        // Mandatory critical recovery, Issue #884, Accessibility, Input, Remote, Network & Play Services blocked
         listOf(
+            "android",
+            "com.android.systemui",
             "com.google.android.permissioncontroller",
             "com.google.android.packageinstaller",
             "com.google.android.ext.services",
@@ -99,8 +115,11 @@ class TvPackageScannerAndSafetyTest {
             "com.google.android.modulemetadata",
             "com.google.android.overlay.modules.permissioncontroller",
             "com.google.android.tv.remote.service",
+            "com.google.android.marvin.talkback",
+            "com.google.android.inputmethod.latin",
             "com.android.vending",
-            "com.google.android.gms"
+            "com.google.android.gms",
+            "com.google.android.networkstack"
         ).forEach { critical ->
             val entry = byPkg.getValue(critical)
             assertTrue("Expected $critical to be blocked from disable", entry.isBlockedFromDisable)
@@ -108,12 +127,10 @@ class TvPackageScannerAndSafetyTest {
             assertEquals(DebloatRecommendation.NEVER_DISABLE, entry.recommendation)
         }
 
-        // Active HOME launcher blocked when it is currently active
         val launcher = byPkg.getValue("com.google.android.tvlauncher")
         assertTrue(launcher.isBlockedFromDisable)
         assertTrue(launcher.isOriginalHomeLauncher)
 
-        // Optional apps require asking user and are never marked SAFE_TO_DISABLE
         listOf(
             "com.netflix.ninja",
             "com.google.android.youtube.tv",
@@ -126,15 +143,65 @@ class TvPackageScannerAndSafetyTest {
             assertEquals(DebloatRecommendation.OPTIONAL_ASK_USER, entry.recommendation)
         }
 
-        // Unknown package grouped cleanly & never SAFE_TO_DISABLE
         val unknown = byPkg.getValue("com.vendor.mysterious.service")
         assertEquals(PackageCategory.UNKNOWN_UNVERIFIED, unknown.category)
         assertTrue(unknown.requiresOptionalPrompt)
         assertFalse(unknown.recommendation == DebloatRecommendation.SAFE_TO_DISABLE)
 
-        // Disabled status preserved accurately
         assertFalse(byPkg.getValue("com.mitv.tvhome.atv").isEnabled)
         assertTrue(byPkg.getValue("com.miui.tv.analytics").isEnabled)
+    }
+
+    @Test
+    fun otherManufacturerPackagesDoNotReceiveAutoRecommendationOnXiaomiStickAndUnknownModelsDefaultToManualReview() {
+        val scanner = TvPackageScanner(dummyAdbManager, DebloatRepository(null))
+
+        // On verified Xiaomi Mi TV Stick, Sony & TCL packages MUST require manual review (not SAFE_TO_DISABLE)
+        val xiaomiScan = scanner.buildScanResult(
+            deviceInfo = xiaomiStickDevice(),
+            installedPackages = listOf(
+                "com.miui.tv.analytics",
+                "com.sony.dtv.osat.analytics",
+                "com.tcl.telemetry"
+            ),
+            disabledPackages = emptySet()
+        ).packages.associateBy { it.packageName }
+
+        assertEquals(DebloatRecommendation.SAFE_TO_DISABLE, xiaomiScan.getValue("com.miui.tv.analytics").recommendation)
+        assertEquals(DebloatRecommendation.OPTIONAL_ASK_USER, xiaomiScan.getValue("com.sony.dtv.osat.analytics").recommendation)
+        assertTrue(xiaomiScan.getValue("com.sony.dtv.osat.analytics").requiresOptionalPrompt)
+        assertEquals(DebloatRecommendation.OPTIONAL_ASK_USER, xiaomiScan.getValue("com.tcl.telemetry").recommendation)
+        assertTrue(xiaomiScan.getValue("com.tcl.telemetry").requiresOptionalPrompt)
+
+        // Unknown / non-Xiaomi model MUST have hasExactModelCatalogMatch == false and NO SAFE_TO_DISABLE items!
+        val unknownTv = TvDeviceInfo(
+            manufacturer = "UnknownBrand",
+            model = "GenericTV-9000",
+            deviceName = "generic_tv",
+            productBoard = "unknown",
+            androidVersion = "11",
+            sdkVersion = 30,
+            buildId = "RTT0",
+            buildFingerprint = "UnknownBrand/generic/generic:11:user/release-keys",
+            currentHomePackage = "com.google.android.tvlauncher",
+            currentHomeActivity = "com.google.android.tvlauncher/.MainActivity",
+            currentHomeLabel = "Android TV Home"
+        )
+        val unknownScan = scanner.buildScanResult(
+            deviceInfo = unknownTv,
+            installedPackages = listOf(
+                "com.miui.tv.analytics",
+                "com.mitv.tvhome.atv",
+                "com.sony.dtv.osat.analytics",
+                "com.vendor.unknown.app"
+            ),
+            disabledPackages = emptySet()
+        )
+        assertFalse("Unknown non-Xiaomi device MUST NOT claim exact catalog match", unknownScan.hasExactModelCatalogMatch)
+        assertTrue(
+            "Unknown device model must default all packages to manual review or protected",
+            unknownScan.packages.all { it.recommendation != DebloatRecommendation.SAFE_TO_DISABLE }
+        )
     }
 
     @Test

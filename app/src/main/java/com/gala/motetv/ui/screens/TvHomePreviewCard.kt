@@ -13,6 +13,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -35,6 +36,7 @@ fun TvHomePreviewCard(
 ) {
     val bg = parseHexColorSafe(config.backgroundColorHex, BackgroundDark)
     val accent = parseHexColorSafe(config.accentColorHex, ElectricBlueLight)
+    val skyAlpha = (config.skyIntensity.coerceIn(0, 100) / 100f) * 0.25f
 
     Surface(
         shape = RoundedCornerShape(18.dp),
@@ -44,75 +46,116 @@ fun TvHomePreviewCard(
             .fillMaxWidth()
             .aspectRatio(16f / 9f)
     ) {
-        Column(
+        Box(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(14.dp),
-            verticalArrangement = Arrangement.SpaceBetween
-        ) {
-            // Top TV status & clock preview
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "CleanYourTV • ${config.themeId}",
-                    style = Typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
-                    color = accent
+                .background(
+                    Brush.verticalGradient(
+                        listOf(
+                            accent.copy(alpha = skyAlpha),
+                            bg.copy(alpha = 0.92f)
+                        )
+                    )
                 )
-                if (config.clockStyle != "hidden") {
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(14.dp),
+                verticalArrangement = Arrangement.SpaceBetween
+            ) {
+                // Top TV status, greeting & clock_format preview
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    val headerTitle = buildString {
+                        append("CleanYourTV")
+                        if (config.greetingName.isNotBlank()) {
+                            append(" • Hi, ${config.greetingName.trim()}")
+                        }
+                        if (config.wallpaperEnabled) {
+                            append(" • WP")
+                        }
+                    }
                     Text(
-                        text = if (config.clockFormat == "12h") "8:45 PM" else "20:45",
-                        fontSize = if (config.clockStyle == "bold") 18.sp else 14.sp,
-                        fontWeight = if (config.clockStyle == "bold") FontWeight.ExtraBold else FontWeight.Medium,
+                        text = headerTitle,
+                        style = Typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
+                        color = accent,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Text(
+                        text = when (config.clockFormat) {
+                            "12" -> "8:45 PM"
+                            "24" -> "20:45"
+                            else -> "20:45 (Sys)"
+                        },
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold,
                         color = Color.White
                     )
                 }
-            }
 
-            // App Grid Preview
-            val cols = config.columns.coerceIn(3, 7)
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                for (i in 0 until cols) {
-                    val isFocused = i == 0
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(34.dp)
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(Color.White.copy(alpha = if (isFocused) 0.18f else 0.08f))
-                            .border(
-                                width = if (isFocused) 1.5.dp else 1.dp,
-                                color = if (isFocused) accent else Color.White.copy(alpha = 0.14f),
-                                shape = RoundedCornerShape(8.dp)
+                // App Grid Preview (columns + single_row + ambient_glow)
+                val cols = config.columns.coerceIn(3, 7)
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        for (i in 0 until cols) {
+                            val isFocused = i == 0
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(if (config.singleRow) 46.dp else 32.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(
+                                        if (isFocused && config.ambientGlow) accent.copy(alpha = 0.24f)
+                                        else Color.White.copy(alpha = if (isFocused) 0.16f else 0.08f)
+                                    )
+                                    .border(
+                                        width = if (isFocused) 1.5.dp else 1.dp,
+                                        color = if (isFocused) accent else Color.White.copy(alpha = 0.14f),
+                                        shape = RoundedCornerShape(8.dp)
+                                    )
                             )
-                    )
-                }
-            }
-
-            // Bottom Dock Preview
-            Surface(
-                shape = RoundedCornerShape(12.dp),
-                color = Color.White.copy(alpha = if (config.dockBlur) 0.14f else 0.06f),
-                border = BorderStroke(1.dp, accent.copy(alpha = 0.35f)),
-                modifier = Modifier.align(Alignment.CenterHorizontally)
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    repeat(config.dockSlots.coerceIn(3, 8)) { idx ->
-                        Box(
-                            modifier = Modifier
-                                .size(14.dp)
-                                .clip(CircleShape)
-                                .background(if (idx == 0) accent else Color.White.copy(alpha = 0.45f))
-                        )
+                        }
                     }
+                }
+
+                // Bottom Dock Preview (dock_row + dock_glass + dock_opacity + dock_band_all)
+                if (config.dockRow) {
+                    val dockAlpha = (config.dockOpacity.coerceIn(30, 100) / 100f) *
+                        (if (config.dockGlass) 0.30f else 0.72f)
+                    val dockFill = if (config.dockGlass) Color.White.copy(alpha = dockAlpha) else Color(0xFF0F172A).copy(alpha = dockAlpha)
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = dockFill,
+                        border = BorderStroke(1.dp, accent.copy(alpha = if (config.dockGlass) 0.55f else 0.25f)),
+                        modifier = if (config.dockBandAll) Modifier.fillMaxWidth() else Modifier.align(Alignment.CenterHorizontally)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            val dockCount = config.dockApps.size.takeIf { it > 0 }?.coerceAtMost(7) ?: 5
+                            repeat(dockCount) { idx ->
+                                Box(
+                                    modifier = Modifier
+                                        .size(14.dp)
+                                        .clip(CircleShape)
+                                        .background(if (idx == 0) accent else Color.White.copy(alpha = 0.50f))
+                                )
+                            }
+                        }
+                    }
+                } else {
+                    Spacer(modifier = Modifier.height(6.dp))
                 }
             }
         }

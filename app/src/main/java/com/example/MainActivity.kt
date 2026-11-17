@@ -387,6 +387,7 @@ fun MainAppHost(
                         }
 
                         NavTab.SETTINGS -> {
+                            val modifiedPkgs by debloatManager.modifiedPackages.collectAsStateWithLifecycle()
                             SettingsScreen(
                                 currentDevice = targetDevice,
                                 connectionState = connectionState,
@@ -425,7 +426,23 @@ fun MainAppHost(
                                 onOpenTvHomeThemes = {
                                     displayMode = MainDisplayMode.TV_HOME_THEMES
                                 },
-                                adbConnectedHost = (adbState as? AdbConnectionState.Connected)?.let { "${it.host}:${it.port}" }
+                                adbConnectedHost = (adbState as? AdbConnectionState.Connected)?.let { "${it.host}:${it.port}" },
+                                modifiedPackagesCount = modifiedPkgs.size,
+                                originalHomePackage = tvHomeLauncherStatus.originalHomePackage,
+                                onRunTvRecovery = {
+                                    val pkgRes = debloatManager.restoreAllModifiedByMoteTv()
+                                    val hasOrigHome = !cleanYourTvLauncherManager.launcherStatus.value.originalHomePackage.isNullOrBlank()
+                                    val homeRes = if (hasOrigHome) cleanYourTvLauncherManager.restoreOriginalHomeLauncher() else null
+                                    when {
+                                        pkgRes.isFailure -> Result.failure(pkgRes.exceptionOrNull()!!)
+                                        homeRes?.isFailure == true -> Result.failure(homeRes.exceptionOrNull()!!)
+                                        else -> {
+                                            val count = pkgRes.getOrNull()?.size ?: 0
+                                            val homeMsg = homeRes?.getOrNull()?.currentHomePackage?.let { " Original HOME '$it' active." } ?: ""
+                                            Result.success("Recovery verified: restored $count MoteTV-disabled package(s).$homeMsg")
+                                        }
+                                    }
+                                }
                             )
                         }
                     }

@@ -23,6 +23,9 @@ class DebloatManager(
     private val _selectedPackages = MutableStateFlow<Set<String>>(emptySet())
     val selectedPackages: StateFlow<Set<String>> = _selectedPackages.asStateFlow()
 
+    private val _modifiedPackages = MutableStateFlow(repository.getModifiedPackages())
+    val modifiedPackages: StateFlow<Set<String>> = _modifiedPackages.asStateFlow()
+
     private val _latestBackup = MutableStateFlow<DebloatBackupRecord?>(repository.getLatestBackup())
     val latestBackup: StateFlow<DebloatBackupRecord?> = _latestBackup.asStateFlow()
 
@@ -40,6 +43,7 @@ class DebloatManager(
         val res = scanner.scanTvPackages()
         res.onSuccess { scanned ->
             _scanResult.value = scanned
+            _modifiedPackages.value = repository.getModifiedPackages()
             _selectedPackages.value = _selectedPackages.value.filter { pkgName ->
                 scanned.packages.any { it.packageName == pkgName && !it.isBlockedFromDisable }
             }.toSet()
@@ -106,33 +110,53 @@ class DebloatManager(
             modifiedByMoteTvPackages = repository.getModifiedPackages().sorted()
         )
         val saved = repository.saveBackup(record)
-        saved.onSuccess {
-            _latestBackup.value = it
-            recordOperation(
-                action = DebloatActionType.BACKUP_CREATED,
-                packageName = null,
-                succeeded = true,
-                verifiedState = "${allPkgs.size} pkgs (${disabledPkgs.size} disabled)",
-                detail = "Backup created before changes (Original HOME: ${it.originalHomePackage ?: "unknown"})"
-            )
-            _statusMessage.value = "Backup saved (${allPkgs.size} packages, HOME=${it.originalHomePackage ?: "unknown"})."
-        }.onFailure {
+        if (saved.isFailure) {
+            val err = saved.exceptionOrNull()!!
             recordOperation(
                 action = DebloatActionType.BACKUP_CREATED,
                 packageName = null,
                 succeeded = false,
                 verifiedState = "Backup failed",
-                detail = it.message ?: "Could not persist backup"
+                detail = err.message ?: "Could not persist backup"
             )
-            _statusMessage.value = "Backup failed — debloat blocked: ${it.message}"
+            _statusMessage.value = "Backup failed — debloat blocked: ${err.message}"
+            return Result.failure(err)
         }
-        return saved
+
+        // Read-back verification ensures backup is actually readable from persistent store
+        val readBack = repository.getLatestBackup()
+        if (readBack == null ||
+            readBack.backupId != record.backupId ||
+            readBack.allInstalledPackages.size != record.allInstalledPackages.size
+        ) {
+            val err = IllegalStateException("Backup verification failed: saved record could not be read back intact.")
+            recordOperation(
+                action = DebloatActionType.BACKUP_CREATED,
+                packageName = null,
+                succeeded = false,
+                verifiedState = "Backup unreadable",
+                detail = err.message!!
+            )
+            _statusMessage.value = "Backup verification failed — debloat blocked."
+            return Result.failure(err)
+        }
+
+        _latestBackup.value = readBack
+        recordOperation(
+            action = DebloatActionType.BACKUP_CREATED,
+            packageName = null,
+            succeeded = true,
+            verifiedState = "${allPkgs.size} pkgs (${disabledPkgs.size} pre-disabled)",
+            detail = "Backup verified before changes (Original HOME: ${readBack.originalHomePackage ?: "unknown"})"
+        )
+        _statusMessage.value = "Backup saved & verified (${allPkgs.size} packages, HOME=${readBack.originalHomePackage ?: "unknown"})."
+        return Result.success(readBack)
     }
 
     /**
      * Disables [packages] in small batches (BATCH_SIZE = 3) using `pm disable-user --user 0`,
-     * verifying each batch via `pm list packages -d`. Refuses to proceed if backup fails or any
-     * package violates PackageSafetyGuard.
+     * verifying each batch via `pm list packages -d`. Refuses to proceed if backup verification fails
+     * or any package violates PackageSafetyGuard. Never marks pre-disabled packages as MoteTV-modified.
      */
     suspend fun disablePackagesWithBackup(
         packages: List<String>,
@@ -160,10 +184,11 @@ class DebloatManager(
             }
         }
 
-        // 2. Mandatory backup before any modification
-        createBackup(intendedTargets = packages).getOrElse { err ->
+        // 2. Mandatory backup (with read-back verification) BEFORE any modification
+        val backup = createBackup(intendedTargets = packages).getOrElse { err ->
             return Result.failure(IllegalStateException("Mandatory backup failed; aborting debloat: ${err.message}", err))
         }
+        val preExistingDisabled = backup.originallyDisabledPackages.toSet()
 
         val batchResults = mutableListOf<DebloatOperationEntry>()
         _batchProgress.value = BatchProgress(packages.size, 0, packages.firstOrNull(), true)
@@ -200,13 +225,22 @@ class DebloatManager(
                 for (pkg in batch) {
                     val actuallyDisabled = verifiedDisabled.contains(pkg)
                     if (actuallyDisabled) {
-                        repository.markPackageModified(pkg)
+                        // Only record packages MoteTV actually changed from enabled -> disabled
+                        if (!preExistingDisabled.contains(pkg)) {
+                            repository.markPackageModified(pkg)
+                            _modifiedPackages.value = repository.getModifiedPackages()
+                        }
+                        val note = if (preExistingDisabled.contains(pkg)) {
+                            "Already disabled before MoteTV (not claimed as MoteTV change)"
+                        } else {
+                            "Disabled via pm disable-user --user 0 and verified in pm list packages -d"
+                        }
                         val entry = recordOperation(
                             action = DebloatActionType.DISABLE_PACKAGE,
                             packageName = pkg,
                             succeeded = true,
                             verifiedState = "DISABLED",
-                            detail = "Disabled via pm disable-user --user 0 and verified in pm list packages -d"
+                            detail = note
                         )
                         batchResults.add(entry)
                     } else {
@@ -233,11 +267,17 @@ class DebloatManager(
         }
     }
 
+    /**
+     * Attempts to restore every package in [packages], continuing even if an individual package fails,
+     * verifies final disabled state, unmarks ONLY verified enabled packages, and returns Result.failure
+     * whenever any package could not be restored.
+     */
     suspend fun restorePackages(packages: List<String>): Result<List<DebloatOperationEntry>> {
         if (packages.isEmpty()) {
             return Result.failure(IllegalArgumentException("No packages selected to restore."))
         }
         val results = mutableListOf<DebloatOperationEntry>()
+        val commandErrors = linkedMapOf<String, String>()
         _batchProgress.value = BatchProgress(packages.size, 0, packages.firstOrNull(), true)
         var processed = 0
         try {
@@ -246,38 +286,63 @@ class DebloatManager(
                 val res = adbManager.enablePackage(pkg)
                 if (res.isFailure) {
                     val err = res.exceptionOrNull()!!
+                    commandErrors[pkg] = err.message ?: "pm enable failed"
+                }
+                processed++
+            }
+
+            val stillDisabled = adbManager.listDisabledPackages().getOrElse { err ->
+                for (pkg in packages) {
+                    val cmdErr = commandErrors[pkg]
                     results.add(
                         recordOperation(
                             action = DebloatActionType.RESTORE_PACKAGE,
                             packageName = pkg,
                             succeeded = false,
-                            verifiedState = "ENABLE_FAILED",
-                            detail = err.message ?: "pm enable failed"
+                            verifiedState = "VERIFY_FAILED",
+                            detail = cmdErr ?: "Post-restore verification failed: ${err.message}"
                         )
                     )
-                    return Result.failure(err)
                 }
-                processed++
+                _statusMessage.value = "Restore verification failed: ${err.message}"
+                return Result.failure(err)
             }
 
-            val stillDisabled = adbManager.listDisabledPackages().getOrElse { return Result.failure(it) }
+            val failedPackages = mutableListOf<String>()
             for (pkg in packages) {
-                val restored = !stillDisabled.contains(pkg)
+                val cmdErr = commandErrors[pkg]
+                val restored = cmdErr == null && !stillDisabled.contains(pkg)
                 if (restored) {
                     repository.unmarkPackageModified(pkg)
+                } else {
+                    failedPackages.add(pkg)
                 }
                 results.add(
                     recordOperation(
                         action = DebloatActionType.RESTORE_PACKAGE,
                         packageName = pkg,
                         succeeded = restored,
-                        verifiedState = if (restored) "ENABLED" else "STILL_DISABLED",
-                        detail = if (restored) "Restored via pm enable and verified" else "Package still disabled"
+                        verifiedState = when {
+                            cmdErr != null -> "ENABLE_FAILED"
+                            restored -> "ENABLED"
+                            else -> "STILL_DISABLED"
+                        },
+                        detail = cmdErr ?: if (restored) "Restored via pm enable and verified" else "Package still listed disabled after pm enable"
                     )
                 )
             }
+
+            _modifiedPackages.value = repository.getModifiedPackages()
             scanTv()
-            _statusMessage.value = "Restored ${results.count { it.succeeded }}/${packages.size} package(s)."
+
+            val succeededCount = results.count { it.succeeded }
+            if (failedPackages.isNotEmpty()) {
+                val msg = "Partial restore: restored $succeededCount/${packages.size}. Failed: ${failedPackages.joinToString()}"
+                _statusMessage.value = msg
+                return Result.failure(IllegalStateException(msg))
+            }
+
+            _statusMessage.value = "Restored & verified $succeededCount/${packages.size} package(s)."
             return Result.success(results)
         } finally {
             _batchProgress.value = BatchProgress(packages.size, processed, null, false)
@@ -291,13 +356,21 @@ class DebloatManager(
             return Result.success(emptyList())
         }
         val res = restorePackages(modified)
-        res.onSuccess {
+        res.onSuccess { entries ->
             recordOperation(
                 action = DebloatActionType.RESTORE_ALL,
                 packageName = null,
                 succeeded = true,
-                verifiedState = "${it.size} restored",
-                detail = "Restored all packages modified by MoteTV"
+                verifiedState = "${entries.size} restored",
+                detail = "Restored and verified all packages modified by MoteTV"
+            )
+        }.onFailure { err ->
+            recordOperation(
+                action = DebloatActionType.RESTORE_ALL,
+                packageName = null,
+                succeeded = false,
+                verifiedState = "PARTIAL_OR_FAILED",
+                detail = err.message ?: "Restore all encountered failures"
             )
         }
         return res

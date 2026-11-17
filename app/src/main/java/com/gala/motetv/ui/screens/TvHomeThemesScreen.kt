@@ -1,5 +1,6 @@
 package com.gala.motetv.ui.screens
 
+import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
@@ -61,8 +62,7 @@ fun TvHomeThemesScreen(
     var selectedCategory by remember { mutableStateOf<ThemePresetCategory?>(null) }
     var dockAppsInput by remember(themeConfig.dockApps) { mutableStateOf(themeConfig.dockApps.joinToString(", ")) }
     var hiddenAppsInput by remember(themeConfig.hiddenApps) { mutableStateOf(themeConfig.hiddenApps.joinToString(", ")) }
-    var pendingWallpaperBytes by remember { mutableStateOf<ByteArray?>(null) }
-    var pendingWallpaperName by remember { mutableStateOf<String?>(null) }
+    var pendingWallpapers by remember { mutableStateOf<List<WallpaperUploadAsset>>(emptyList()) }
     var busyMessage by remember { mutableStateOf<String?>(null) }
 
     val isAdbConnected = adbState is AdbConnectionState.Connected
@@ -89,17 +89,29 @@ fun TvHomeThemesScreen(
         }
     }
 
-    val wallpaperPickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.PickVisualMedia()
-    ) { uri ->
-        if (uri != null) {
+    fun readWallpaperAssets(uris: List<Uri>): List<WallpaperUploadAsset> {
+        return uris.mapIndexedNotNull { idx, uri ->
             val bytes = runCatching {
                 context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
             }.getOrNull()
             if (bytes != null && bytes.isNotEmpty()) {
-                pendingWallpaperBytes = bytes
-                pendingWallpaperName = "motetv_wallpaper_${System.currentTimeMillis()}.jpg"
-                busyMessage = "Wallpaper selected (${bytes.size / 1024} KB). Tap 'Apply to TV' to deploy."
+                WallpaperUploadAsset("motetv_wallpaper_${idx + 1}.jpg", bytes)
+            } else {
+                null
+            }
+        }
+    }
+
+    val wallpaperPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickMultipleVisualMedia(maxItems = 10)
+    ) { uris ->
+        if (uris.isNotEmpty()) {
+            val assets = readWallpaperAssets(uris)
+            if (assets.isNotEmpty()) {
+                pendingWallpapers = assets
+                themeManager.updateConfig { it.copy(wallpaperEnabled = true) }
+                val totalKb = assets.sumOf { it.bytes.size } / 1024
+                busyMessage = "${assets.size} wallpaper image(s) staged ($totalKb KB total). Tap 'Apply Theme to TV' to deploy and verify."
             }
         }
     }
@@ -153,7 +165,7 @@ fun TvHomeThemesScreen(
                     .weight(1f),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                // Scope Clarification Banner
+                // Honest Scope & Compatibility Notice
                 item(key = "scope_banner") {
                     Surface(
                         shape = RoundedCornerShape(16.dp),
@@ -161,13 +173,23 @@ fun TvHomeThemesScreen(
                         border = BorderStroke(1.dp, ElectricBlueLight.copy(alpha = 0.45f)),
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Row(modifier = Modifier.padding(14.dp), verticalAlignment = Alignment.Top) {
-                            Icon(Icons.Default.Tv, contentDescription = null, tint = ElectricBlueLight)
-                            Spacer(modifier = Modifier.width(10.dp))
+                        Column(
+                            modifier = Modifier.padding(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Row(verticalAlignment = Alignment.Top) {
+                                Icon(Icons.Default.Tv, contentDescription = null, tint = ElectricBlueLight)
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Text(
+                                    text = "Customizes CleanYourTV Home (com.gathin.tvhome) on your TV via verified config.json & wallpaper deployment. Does NOT skin stock Xiaomi PatchWall, stock Android TV Home, or Android System UI.",
+                                    style = Typography.bodySmall,
+                                    color = TextPrimary
+                                )
+                            }
                             Text(
-                                text = "Changes your TV's actual HOME screen (CleanYourTV Home • com.gathin.tvhome), NOT the MoteTV phone UI. Stock TV HOME stays preserved for one-tap recovery.",
-                                style = Typography.bodySmall,
-                                color = TextPrimary
+                                text = "Unsupported by CleanYourTV schema (not offered): custom icon packs, clock typography families, blur radius, and arbitrary dock slot limits.",
+                                style = Typography.labelSmall,
+                                color = TextSecondary
                             )
                         }
                     }
@@ -292,7 +314,7 @@ fun TvHomeThemesScreen(
                             verticalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
                             Text(
-                                text = "LIVE TV SCREEN PREVIEW",
+                                text = "LIVE TV SCREEN PREVIEW (${themeConfig.selectedPresetId})",
                                 style = Typography.labelSmall.copy(fontWeight = FontWeight.Bold, letterSpacing = 0.8.sp),
                                 color = TextMuted
                             )
@@ -301,11 +323,11 @@ fun TvHomeThemesScreen(
                     }
                 }
 
-                // C. Official CleanYourTV Presets (29 themes)
+                // C. Official CleanYourTV Presets
                 item(key = "presets_browser") {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text(
-                            text = "CLEANYOURTV THEMES (${CleanYourTvThemeCatalog.PRESETS.size})",
+                            text = "CLEANYOURTV PRESETS (${CleanYourTvThemeCatalog.PRESETS.size})",
                             style = Typography.labelSmall.copy(fontWeight = FontWeight.Bold, letterSpacing = 0.8.sp),
                             color = TextMuted
                         )
@@ -339,7 +361,7 @@ fun TvHomeThemesScreen(
                             items(presets, key = { it.id }) { preset ->
                                 ThemePresetChipCard(
                                     preset = preset,
-                                    isSelected = themeConfig.themeId == preset.id,
+                                    isSelected = themeConfig.selectedPresetId == preset.id,
                                     onClick = { themeManager.selectPreset(preset) }
                                 )
                             }
@@ -347,7 +369,7 @@ fun TvHomeThemesScreen(
                     }
                 }
 
-                // D. Customization Controls
+                // D. CleanYourTV-Supported Customization Controls
                 item(key = "customizer_card") {
                     GlassCard(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp)) {
                         Column(
@@ -355,7 +377,7 @@ fun TvHomeThemesScreen(
                             verticalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
                             Text(
-                                text = "LAYOUT & VISUAL CUSTOMIZATION",
+                                text = "SUPPORTED CLEANYOURTV OPTIONS",
                                 style = Typography.labelSmall.copy(fontWeight = FontWeight.Bold, letterSpacing = 0.8.sp),
                                 color = TextMuted
                             )
@@ -380,7 +402,7 @@ fun TvHomeThemesScreen(
                                 )
                             }
 
-                            Text("App Grid Columns: ${themeConfig.columns}", style = Typography.bodySmall, color = TextPrimary)
+                            Text("App Grid Columns (columns): ${themeConfig.columns}", style = Typography.bodySmall, color = TextPrimary)
                             Slider(
                                 value = themeConfig.columns.toFloat(),
                                 onValueChange = { v -> themeManager.updateConfig { it.copy(columns = v.toInt().coerceIn(3, 7)) } },
@@ -388,12 +410,35 @@ fun TvHomeThemesScreen(
                                 steps = 3
                             )
 
-                            Text("Dock Slots: ${themeConfig.dockSlots}", style = Typography.bodySmall, color = TextPrimary)
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text("Show Bottom Dock (dock_row)", style = Typography.bodyMedium, color = TextPrimary)
+                                Switch(
+                                    checked = themeConfig.dockRow,
+                                    onCheckedChange = { v -> themeManager.updateConfig { it.copy(dockRow = v) } }
+                                )
+                            }
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text("Dock Glass Effect (dock_glass)", style = Typography.bodyMedium, color = TextPrimary)
+                                Switch(
+                                    checked = themeConfig.dockGlass,
+                                    onCheckedChange = { v -> themeManager.updateConfig { it.copy(dockGlass = v) } }
+                                )
+                            }
+
+                            Text("Dock Opacity (dock_opacity): ${themeConfig.dockOpacity}%", style = Typography.bodySmall, color = TextPrimary)
                             Slider(
-                                value = themeConfig.dockSlots.toFloat(),
-                                onValueChange = { v -> themeManager.updateConfig { it.copy(dockSlots = v.toInt().coerceIn(3, 8)) } },
-                                valueRange = 3f..8f,
-                                steps = 4
+                                value = themeConfig.dockOpacity.toFloat(),
+                                onValueChange = { v -> themeManager.updateConfig { it.copy(dockOpacity = v.toInt().coerceIn(30, 100)) } },
+                                valueRange = 30f..100f
                             )
 
                             Row(
@@ -401,10 +446,10 @@ fun TvHomeThemesScreen(
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Text("Dock Blur", style = Typography.bodyMedium, color = TextPrimary)
+                                Text("Single Row Grid (single_row)", style = Typography.bodyMedium, color = TextPrimary)
                                 Switch(
-                                    checked = themeConfig.dockBlur,
-                                    onCheckedChange = { v -> themeManager.updateConfig { it.copy(dockBlur = v) } }
+                                    checked = themeConfig.singleRow,
+                                    onCheckedChange = { v -> themeManager.updateConfig { it.copy(singleRow = v) } }
                                 )
                             }
 
@@ -413,35 +458,73 @@ fun TvHomeThemesScreen(
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Text("24-Hour Clock (${themeConfig.clockFormat})", style = Typography.bodyMedium, color = TextPrimary)
+                                Text("Full-Width Dock Band (dock_band_all)", style = Typography.bodyMedium, color = TextPrimary)
                                 Switch(
-                                    checked = themeConfig.clockFormat == "24h",
-                                    onCheckedChange = { is24 ->
-                                        themeManager.updateConfig { it.copy(clockFormat = if (is24) "24h" else "12h") }
-                                    }
+                                    checked = themeConfig.dockBandAll,
+                                    onCheckedChange = { v -> themeManager.updateConfig { it.copy(dockBandAll = v) } }
                                 )
                             }
 
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text("Ambient Focus Glow (ambient_glow)", style = Typography.bodyMedium, color = TextPrimary)
+                                Switch(
+                                    checked = themeConfig.ambientGlow,
+                                    onCheckedChange = { v -> themeManager.updateConfig { it.copy(ambientGlow = v) } }
+                                )
+                            }
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text("Glow Snap Focus (glow_snap)", style = Typography.bodyMedium, color = TextPrimary)
+                                Switch(
+                                    checked = themeConfig.glowSnap,
+                                    onCheckedChange = { v -> themeManager.updateConfig { it.copy(glowSnap = v) } }
+                                )
+                            }
+
+                            Text("Sky Glow Intensity (sky_intensity): ${themeConfig.skyIntensity}%", style = Typography.bodySmall, color = TextPrimary)
+                            Slider(
+                                value = themeConfig.skyIntensity.toFloat(),
+                                onValueChange = { v -> themeManager.updateConfig { it.copy(skyIntensity = v.toInt().coerceIn(0, 100)) } },
+                                valueRange = 0f..100f
+                            )
+
+                            Text("Clock Format (clock_format)", style = Typography.bodySmall, color = TextPrimary)
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
-                                listOf("minimal", "bold", "hidden").forEach { style ->
+                                listOf("system" to "System", "12" to "12-Hour", "24" to "24-Hour").forEach { (fmt, label) ->
                                     FilterChip(
-                                        selected = themeConfig.clockStyle == style,
-                                        onClick = { themeManager.updateConfig { it.copy(clockStyle = style) } },
-                                        label = { Text("Clock: $style") },
+                                        selected = themeConfig.clockFormat == fmt,
+                                        onClick = { themeManager.updateConfig { it.copy(clockFormat = fmt) } },
+                                        label = { Text(label) },
                                         modifier = Modifier.defaultMinSize(minHeight = 48.dp)
                                     )
                                 }
                             }
 
+                            OutlinedTextField(
+                                value = themeConfig.greetingName,
+                                onValueChange = { name -> themeManager.updateConfig { it.copy(greetingName = name.take(32)) } },
+                                label = { Text("Greeting Name (greeting_name, optional)") },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Text("Show TV System Stats", style = Typography.bodyMedium, color = TextPrimary)
+                                Text("Show TV System Stats (show_stats)", style = Typography.bodyMedium, color = TextPrimary)
                                 Switch(
                                     checked = themeConfig.showStats,
                                     onCheckedChange = { v -> themeManager.updateConfig { it.copy(showStats = v) } }
@@ -453,38 +536,76 @@ fun TvHomeThemesScreen(
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Text("Reduced Motion", style = Typography.bodyMedium, color = TextPrimary)
+                                Text("Reduced Motion (reduced_motion)", style = Typography.bodyMedium, color = TextPrimary)
                                 Switch(
                                     checked = themeConfig.reducedMotion,
                                     onCheckedChange = { v -> themeManager.updateConfig { it.copy(reducedMotion = v) } }
                                 )
                             }
 
-                            OutlinedTextField(
-                                value = dockAppsInput,
-                                onValueChange = { raw ->
-                                    dockAppsInput = raw
-                                    themeManager.updateConfig {
-                                        it.copy(dockApps = raw.split(",").map { s -> s.trim() }.filter { s -> s.isNotEmpty() })
-                                    }
-                                },
-                                label = { Text("Pinned Dock Apps (comma package IDs)") },
-                                singleLine = true,
-                                modifier = Modifier.fillMaxWidth()
+                            HorizontalDivider(color = GlassBorder)
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text("Custom Wallpaper (wallpaper)", style = Typography.bodyMedium, color = TextPrimary)
+                                Switch(
+                                    checked = themeConfig.wallpaperEnabled,
+                                    onCheckedChange = { v -> themeManager.updateConfig { it.copy(wallpaperEnabled = v) } }
+                                )
+                            }
+
+                            Text("Wallpaper Dim (wallpaper_dim): ${themeConfig.wallpaperDim}%", style = Typography.bodySmall, color = TextPrimary)
+                            Slider(
+                                value = themeConfig.wallpaperDim.toFloat(),
+                                onValueChange = { v -> themeManager.updateConfig { it.copy(wallpaperDim = v.toInt().coerceIn(0, 85)) } },
+                                valueRange = 0f..85f
                             )
 
-                            OutlinedTextField(
-                                value = hiddenAppsInput,
-                                onValueChange = { raw ->
-                                    hiddenAppsInput = raw
-                                    themeManager.updateConfig {
-                                        it.copy(hiddenApps = raw.split(",").map { s -> s.trim() }.filter { s -> s.isNotEmpty() })
-                                    }
-                                },
-                                label = { Text("Hidden Apps (comma package IDs)") },
-                                singleLine = true,
-                                modifier = Modifier.fillMaxWidth()
-                            )
+                            Text("Wallpaper Rotation (wallpaper_rotation_minutes)", style = Typography.bodySmall, color = TextPrimary)
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                listOf(0 to "Static", 15 to "15m", 30 to "30m", 60 to "1h", 1440 to "Daily").forEach { (mins, label) ->
+                                    FilterChip(
+                                        selected = themeConfig.wallpaperRotationMinutes == mins,
+                                        onClick = { themeManager.updateConfig { it.copy(wallpaperRotationMinutes = mins) } },
+                                        label = { Text(label) },
+                                        modifier = Modifier.defaultMinSize(minHeight = 48.dp)
+                                    )
+                                }
+                            }
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                listOf("sequential" to "Sequential Order", "random" to "Random Order").forEach { (order, label) ->
+                                    FilterChip(
+                                        selected = themeConfig.wallpaperOrder == order,
+                                        onClick = { themeManager.updateConfig { it.copy(wallpaperOrder = order) } },
+                                        label = { Text(label) },
+                                        modifier = Modifier.defaultMinSize(minHeight = 48.dp)
+                                    )
+                                }
+                            }
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text("Wallpaper Captions (wallpaper_captions)", style = Typography.bodyMedium, color = TextPrimary)
+                                Switch(
+                                    checked = themeConfig.wallpaperCaptions,
+                                    onCheckedChange = { v -> themeManager.updateConfig { it.copy(wallpaperCaptions = v) } }
+                                )
+                            }
 
                             OutlinedButton(
                                 onClick = {
@@ -502,15 +623,45 @@ fun TvHomeThemesScreen(
                                 Icon(Icons.Default.Wallpaper, contentDescription = null, tint = ElectricBlueLight)
                                 Spacer(modifier = Modifier.width(8.dp))
                                 Text(
-                                    text = pendingWallpaperName?.let { "Wallpaper Ready: $it" } ?: "Pick Custom TV Wallpaper",
+                                    text = if (pendingWallpapers.isNotEmpty()) {
+                                        "Staged ${pendingWallpapers.size} Wallpaper(s)"
+                                    } else {
+                                        "Pick TV Wallpaper(s) -> files/wallpaper.jpg"
+                                    },
                                     color = ElectricBlueLight
                                 )
                             }
+
+                            OutlinedTextField(
+                                value = dockAppsInput,
+                                onValueChange = { raw ->
+                                    dockAppsInput = raw
+                                    themeManager.updateConfig {
+                                        it.copy(dockApps = raw.split(",").map { s -> s.trim() }.filter { s -> s.isNotEmpty() })
+                                    }
+                                },
+                                label = { Text("Pinned Dock Apps (dock_apps, comma package IDs)") },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+
+                            OutlinedTextField(
+                                value = hiddenAppsInput,
+                                onValueChange = { raw ->
+                                    hiddenAppsInput = raw
+                                    themeManager.updateConfig {
+                                        it.copy(hiddenApps = raw.split(",").map { s -> s.trim() }.filter { s -> s.isNotEmpty() })
+                                    }
+                                },
+                                label = { Text("Hidden Apps (hidden_apps, comma package IDs)") },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth()
+                            )
                         }
                     }
                 }
 
-                // E. Status & Apply / Rollback / Reset
+                // E. Status & Verified Apply / Rollback / Reset
                 item(key = "apply_actions") {
                     GlassCard(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp)) {
                         Column(
@@ -518,17 +669,29 @@ fun TvHomeThemesScreen(
                             verticalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
                             (busyMessage ?: themeStatus)?.let { msg ->
-                                Text(text = msg, style = Typography.bodySmall, color = ElectricBlueLight)
+                                val isFailure = msg.contains("failed", ignoreCase = true) ||
+                                    msg.contains("not installed", ignoreCase = true) ||
+                                    msg.contains("does not exist", ignoreCase = true) ||
+                                    msg.contains("WARNING", ignoreCase = true)
+                                Text(
+                                    text = msg,
+                                    style = Typography.bodySmall,
+                                    color = if (isFailure) StatusWarningAmber else StatusSuccessGreen
+                                )
                             }
 
                             Button(
                                 onClick = {
                                     scope.launch {
-                                        val res = themeManager.applyThemeToTv(pendingWallpaperBytes, pendingWallpaperName)
-                                        if (res.isSuccess) {
-                                            pendingWallpaperBytes = null
-                                            pendingWallpaperName = null
-                                        }
+                                        busyMessage = "Deploying config.json & verifying on TV..."
+                                        val res = themeManager.applyThemeToTv(pendingWallpapers)
+                                        busyMessage = res.fold(
+                                            onSuccess = {
+                                                pendingWallpapers = emptyList()
+                                                themeManager.themeStatusMessage.value
+                                            },
+                                            onFailure = { "Apply failed: ${it.message}" }
+                                        )
                                     }
                                 },
                                 enabled = isAdbConnected,
@@ -541,7 +704,7 @@ fun TvHomeThemesScreen(
                             ) {
                                 Icon(Icons.Default.Check, contentDescription = null)
                                 Spacer(modifier = Modifier.width(6.dp))
-                                Text("Apply Theme to TV", style = Typography.labelLarge.copy(fontWeight = FontWeight.Bold))
+                                Text("Apply & Verify Theme on TV", style = Typography.labelLarge.copy(fontWeight = FontWeight.Bold))
                             }
 
                             Row(
@@ -549,7 +712,15 @@ fun TvHomeThemesScreen(
                                 horizontalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
                                 OutlinedButton(
-                                    onClick = { scope.launch { themeManager.rollbackPreviousTheme() } },
+                                    onClick = {
+                                        scope.launch {
+                                            val res = themeManager.rollbackPreviousTheme()
+                                            busyMessage = res.fold(
+                                                onSuccess = { themeManager.themeStatusMessage.value },
+                                                onFailure = { "Rollback failed: ${it.message}" }
+                                            )
+                                        }
+                                    },
                                     enabled = isAdbConnected && prevConfig != null,
                                     border = BorderStroke(1.dp, GlassBorderStrong),
                                     shape = RoundedCornerShape(12.dp),
@@ -562,7 +733,15 @@ fun TvHomeThemesScreen(
                                 }
 
                                 OutlinedButton(
-                                    onClick = { scope.launch { themeManager.resetThemeOnTv() } },
+                                    onClick = {
+                                        scope.launch {
+                                            val res = themeManager.resetThemeOnTv()
+                                            busyMessage = res.fold(
+                                                onSuccess = { themeManager.themeStatusMessage.value },
+                                                onFailure = { "Reset failed: ${it.message}" }
+                                            )
+                                        }
+                                    },
                                     enabled = isAdbConnected,
                                     border = BorderStroke(1.dp, StatusErrorRed.copy(alpha = 0.7f)),
                                     shape = RoundedCornerShape(12.dp),

@@ -9,6 +9,8 @@ import kotlinx.coroutines.flow.StateFlow
  */
 interface AdbConnectionManager {
     val connectionState: StateFlow<AdbConnectionState>
+    val pairingState: StateFlow<AdbPairingState>
+    val diagnosticCategory: StateFlow<AdbDiagnosticCategory>
     val discoveredServices: StateFlow<List<DiscoveredAdbService>>
     val isDiscovering: StateFlow<Boolean>
     val savedEndpoint: StateFlow<AdbEndpointConfig?>
@@ -31,8 +33,11 @@ interface AdbConnectionManager {
     suspend fun enablePackage(packageName: String): Result<AdbCommandResult>
     suspend fun launchHomeChooserOrOpenHome(): Result<AdbCommandResult>
     suspend fun setDefaultHomeActivity(componentName: String): Result<AdbCommandResult>
+    suspend fun restartCleanYourTvLauncher(): Result<AdbCommandResult>
     suspend fun installApk(apkBytes: ByteArray): Result<AdbCommandResult>
     suspend fun pushAppConfigFile(remotePath: String, content: ByteArray): Result<AdbCommandResult>
+    suspend fun readRemoteFile(remotePath: String): Result<ByteArray>
+    suspend fun remoteFileExists(remotePath: String): Result<Boolean>
     suspend fun ensureRemoteDirectory(remoteDir: String): Result<AdbCommandResult>
     suspend fun removeRemoteFile(remotePath: String): Result<AdbCommandResult>
     suspend fun checkFilePushSupported(): Result<Boolean>

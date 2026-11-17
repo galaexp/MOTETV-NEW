@@ -1358,4 +1358,47 @@ class TvRemoteManagerConnectionTest {
             managerScope.cancel()
         }
     }
+
+    // =========================================================================
+    // Scenario 29: Null ping_response val1 cannot clear outstanding heartbeat
+    // =========================================================================
+    @Test
+    fun test29_nullPongValDoesNotClearOutstandingPing() = runTest {
+        val testDispatcher = StandardTestDispatcher(testScheduler)
+        val managerScope = kotlinx.coroutines.CoroutineScope(testDispatcher + kotlinx.coroutines.Job())
+        var transport: FakeTvTransport? = null
+
+        val manager = TvRemoteManagerImpl(
+            credentialStore = credentialStore,
+            ioDispatcher = testDispatcher,
+            scope = managerScope,
+            transportFactory = { host, port, _ ->
+                FakeTvTransport(host, port).also { transport = it }
+            },
+            timeProvider = { testScheduler.currentTime }
+        )
+
+        try {
+            manager.connect(testDevice)
+            testScheduler.runCurrent()
+
+            advanceTimeBy(13000L)
+            testScheduler.runCurrent()
+            assertTrue(manager.connectionDiagnostics.value.isPingOutstanding)
+
+            // Send RemotePingResponse with val1 = null
+            transport!!.sendFrameToClient(
+                RemoteMessage(remote_ping_response = RemotePingResponse(val1 = null))
+            )
+            advanceTimeBy(200L)
+            testScheduler.runCurrent()
+
+            assertTrue(
+                "Null pong val1 must NOT clear outstanding ping",
+                manager.connectionDiagnostics.value.isPingOutstanding
+            )
+        } finally {
+            managerScope.cancel()
+        }
+    }
 }

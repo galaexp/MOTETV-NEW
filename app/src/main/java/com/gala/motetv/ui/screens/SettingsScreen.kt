@@ -28,6 +28,7 @@ import com.gala.motetv.core.model.TvDevice
 import com.gala.motetv.storage.TvCredentialStore
 import com.gala.motetv.ui.components.GlassCard
 import com.gala.motetv.ui.theme.*
+import kotlinx.coroutines.launch
 
 @Composable
 fun SettingsScreen(
@@ -44,9 +45,15 @@ fun SettingsScreen(
     onOpenTvDebloat: () -> Unit = {},
     onOpenTvHomeThemes: () -> Unit = {},
     adbConnectedHost: String? = null,
+    modifiedPackagesCount: Int = 0,
+    originalHomePackage: String? = null,
+    onRunTvRecovery: (suspend () -> Result<String>)? = null,
     modifier: Modifier = Modifier
 ) {
+    val scope = rememberCoroutineScope()
     val scrollState = rememberScrollState()
+    var recoveryRunning by remember { mutableStateOf(false) }
+    var recoveryFeedback by remember { mutableStateOf<Pair<Boolean, String>?>(null) }
     var hapticEnabled by remember { mutableStateOf(credentialStore.isHapticEnabled()) }
     var renameTarget by remember { mutableStateOf<TvDevice?>(null) }
     var newTvName by remember { mutableStateOf("") }
@@ -423,6 +430,104 @@ fun SettingsScreen(
                         contentDescription = "Open TV Home & Themes",
                         tint = TextSecondary
                     )
+                }
+            }
+
+            // 5B. PROMINENT TV RECOVERY QUICK ACTION
+            GlassCard(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("settings_tv_recovery_card"),
+                shape = RoundedCornerShape(22.dp),
+                borderColor = StatusWarningAmber.copy(alpha = 0.45f)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(18.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(42.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(StatusWarningAmber.copy(alpha = 0.16f))
+                                .border(1.dp, StatusWarningAmber.copy(alpha = 0.45f), RoundedCornerShape(12.dp)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Restore,
+                                contentDescription = null,
+                                tint = StatusWarningAmber,
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text(
+                                text = "TV RECOVERY",
+                                style = Typography.labelSmall.copy(fontWeight = FontWeight.Bold, letterSpacing = 1.sp),
+                                color = StatusWarningAmber
+                            )
+                            Text(
+                                text = "Restore MoteTV-disabled TV packages ($modifiedPackagesCount tracked) and original HOME${originalHomePackage?.let { " ($it)" } ?: ""}.",
+                                style = Typography.bodySmall,
+                                color = TextSecondary
+                            )
+                        }
+                    }
+
+                    recoveryFeedback?.let { (ok, msg) ->
+                        Text(
+                            text = msg,
+                            style = Typography.bodySmall,
+                            color = if (ok) StatusSuccessGreen else StatusErrorRed
+                        )
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(
+                            onClick = {
+                                if (adbConnectedHost == null) {
+                                    onOpenTvDebloat()
+                                } else if (onRunTvRecovery != null) {
+                                    scope.launch {
+                                        recoveryRunning = true
+                                        val res = onRunTvRecovery()
+                                        recoveryRunning = false
+                                        recoveryFeedback = res.fold(
+                                            onSuccess = { true to it },
+                                            onFailure = { false to (it.message ?: "Recovery encountered an error") }
+                                        )
+                                    }
+                                }
+                            },
+                            enabled = !recoveryRunning,
+                            colors = ButtonDefaults.buttonColors(containerColor = StatusWarningAmber.copy(alpha = 0.85f)),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .defaultMinSize(minHeight = 48.dp)
+                                .testTag("settings_recover_tv_button")
+                        ) {
+                            Text(
+                                text = when {
+                                    recoveryRunning -> "Recovering..."
+                                    adbConnectedHost == null -> "Connect ADB & Recover"
+                                    else -> "Recover TV Now"
+                                },
+                                style = Typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                                color = BackgroundDark
+                            )
+                        }
+                    }
                 }
             }
 

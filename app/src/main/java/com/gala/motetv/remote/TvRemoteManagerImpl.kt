@@ -21,6 +21,7 @@ import com.google.android.apps.tv.remote.protocol.RemoteMessage
 import com.google.android.apps.tv.remote.protocol.RemotePingRequest
 import com.google.android.apps.tv.remote.protocol.RemotePingResponse
 import com.google.android.apps.tv.remote.protocol.RemoteSetActive
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -433,6 +434,9 @@ class TvRemoteManagerImpl(
             startHealthMonitor(sessionId)
             drainCommandQueue(writer, sessionId)
 
+        } catch (e: CancellationException) {
+            isConnectingOrHandshaking = false
+            throw e
         } catch (e: Exception) {
             isConnectingOrHandshaking = false
             TvLogger.w(TvLogger.TAG_REMOTE, "[$sessionId] Connection attempt failed: ${e.message}")
@@ -470,6 +474,8 @@ class TvRemoteManagerImpl(
                         delay(200L)
                     }
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 if (activeSessionId == sessionId && !intentionalDisconnect) {
                     TvLogger.w(TvLogger.TAG_REMOTE, "[$sessionId] Reader loop terminated: ${e.message}")
@@ -520,9 +526,9 @@ class TvRemoteManagerImpl(
             }
 
             msg.remote_ping_response != null -> {
-                val pongVal = msg.remote_ping_response.val1 ?: 0
+                val pongVal = msg.remote_ping_response.val1
                 TvLogger.d(TvLogger.TAG_REMOTE, "[$sessionId] REMOTE RX: PING_RESPONSE received (val1=$pongVal, expected=$outstandingPingVal, isOutstanding=$isPingOutstanding)")
-                if (isPingOutstanding && pongVal == outstandingPingVal) {
+                if (isPingOutstanding && pongVal != null && pongVal == outstandingPingVal) {
                     isPingOutstanding = false
                     outstandingPingVal = 0
                     updateDiagnostics()

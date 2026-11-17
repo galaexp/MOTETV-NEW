@@ -35,7 +35,8 @@ data class KnownPackageDescriptor(
     val reason: String,
     val riskLevel: RiskLevel,
     val requiresOptionalPrompt: Boolean = false,
-    val verifiedXiaomiStickModels: Set<String> = emptySet()
+    val verifiedXiaomiStickModels: Set<String> = emptySet(),
+    val supportedManufacturers: Set<String> = emptySet()
 )
 
 data class ScannedPackage(

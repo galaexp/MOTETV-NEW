@@ -5,15 +5,16 @@ import java.io.Closeable
 import java.io.DataInputStream
 import java.io.EOFException
 import java.io.IOException
-import java.io.InputStream
 import java.io.OutputStream
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.net.SocketTimeoutException
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.security.KeyPair
 import java.security.SecureRandom
 import java.security.cert.X509Certificate
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLSocket
@@ -29,7 +30,17 @@ interface AdbSession : Closeable {
 
     suspend fun openShell(command: String): AdbCommandResult
     suspend fun pushFile(remotePath: String, content: ByteArray, mode: Int = 420): AdbCommandResult
+
+    suspend fun pullFile(remotePath: String): ByteArray {
+        return openShell("cat '$remotePath'").stdout.toByteArray(Charsets.UTF_8)
+    }
 }
+
+class AdbOperationException(
+    val category: AdbDiagnosticCategory,
+    message: String,
+    cause: Throwable? = null
+) : IOException(message, cause)
 
 internal object AdbProtocolConstants {
     const val A_SYNC = 0x434e5953
@@ -50,6 +61,7 @@ internal object AdbProtocolConstants {
     const val AUTH_RSAPUBLICKEY = 3
 
     const val SYNC_MAX_CHUNK = 64 * 1024
+    const val MAX_PULL_FILE_BYTES = 2 * 1024 * 1024
 }
 
 internal data class AdbPacket(
@@ -115,7 +127,6 @@ internal object AdbWireCodec {
         if (length > 0) {
             input.readFully(payload)
         }
-        // Validate checksum only when non-zero or payload present (STLS modern peers may omit CRC when 0)
         if (crc != 0) {
             val actualCrc = payload.sumOf { (it.toInt() and 0xFF) }
             if (actualCrc != crc) {
@@ -130,7 +141,7 @@ internal object AdbWireCodec {
  * Pure-Kotlin TCP/TLS implementation of the ADB wire protocol supporting:
  * - Legacy authenticated network ADB (port 5555)
  * - Post-pairing Wireless Debugging TLS (`STLS` + client certificate / RSA AUTH)
- * - `shell:` execution and `sync:` file push
+ * - `shell:` execution and `sync:` SEND/RECV file operations
  */
 class AdbTcpSession(
     private val host: String,
@@ -138,6 +149,7 @@ class AdbTcpSession(
     private val mode: AdbConnectionMode,
     private val credentialStore: AdbCredentialStore,
     private val connectTimeoutMs: Int = 8_000,
+    private val commandReadTimeoutMs: Int = 15_000,
     private val authApprovalTimeoutMs: Int = 45_000,
     private val onAwaitingTvAuthorization: () -> Unit = {}
 ) : AdbSession {
@@ -147,195 +159,337 @@ class AdbTcpSession(
     private var output: OutputStream? = null
     private val streamIdCounter = AtomicInteger(1)
     private val ioLock = Any()
+    private val handshakeCompleted = AtomicBoolean(false)
+    private val closedFlag = AtomicBoolean(false)
 
     override var banner: String = ""
         private set
 
     override val isConnected: Boolean
         get() {
+            if (closedFlag.get() || !handshakeCompleted.get()) return false
             val s = socket ?: return false
             return s.isConnected && !s.isClosed && !s.isInputShutdown && !s.isOutputShutdown
         }
 
     fun connectAndAuthenticate() {
         val rawSocket = Socket()
-        rawSocket.soTimeout = connectTimeoutMs
-        rawSocket.tcpNoDelay = true
-        rawSocket.connect(InetSocketAddress(host, port), connectTimeoutMs)
-        socket = rawSocket
+        try {
+            rawSocket.soTimeout = connectTimeoutMs
+            rawSocket.tcpNoDelay = true
+            rawSocket.connect(InetSocketAddress(host, port), connectTimeoutMs)
+            socket = rawSocket
 
-        var inStream = DataInputStream(rawSocket.getInputStream())
-        var outStream = rawSocket.getOutputStream()
-        input = inStream
-        output = outStream
+            var inStream = DataInputStream(rawSocket.getInputStream())
+            var outStream = rawSocket.getOutputStream()
+            input = inStream
+            output = outStream
 
-        // Send CNXN banner
-        val cnxnBanner = "host::features=shell_v2,cmd,stat_v2\u0000".toByteArray(Charsets.US_ASCII)
-        writePacket(outStream, AdbProtocolConstants.A_CNXN, AdbProtocolConstants.VERSION, AdbProtocolConstants.MAX_DATA, cnxnBanner)
+            val cnxnBanner = "host::features=shell_v2,cmd,stat_v2\u0000".toByteArray(Charsets.US_ASCII)
+            writePacket(outStream, AdbProtocolConstants.A_CNXN, AdbProtocolConstants.VERSION, AdbProtocolConstants.MAX_DATA, cnxnBanner)
 
-        var sentSignature = false
-        var sentPubKey = false
+            var sentSignature = false
+            var sentPubKey = false
 
-        while (true) {
-            val pkt = AdbWireCodec.readPacket(inStream)
-            when (pkt.command) {
-                AdbProtocolConstants.A_STLS -> {
-                    if (mode != AdbConnectionMode.WIRELESS_DEBUGGING_TLS) {
-                        // Device requires TLS upgrade even if user chose 5555; honor STLS
+            while (true) {
+                val pkt = AdbWireCodec.readPacket(inStream)
+                when (pkt.command) {
+                    AdbProtocolConstants.A_STLS -> {
+                        writePacket(outStream, AdbProtocolConstants.A_STLS, AdbProtocolConstants.VERSION_STLS, 0)
+                        val tlsSocket = upgradeToTls(rawSocket, credentialStore.getOrCreateAdbKeyPair())
+                        socket = tlsSocket
+                        inStream = DataInputStream(tlsSocket.inputStream)
+                        outStream = tlsSocket.outputStream
+                        input = inStream
+                        output = outStream
                     }
-                    writePacket(outStream, AdbProtocolConstants.A_STLS, AdbProtocolConstants.VERSION_STLS, 0)
-                    val tlsSocket = upgradeToTls(rawSocket, credentialStore.getOrCreateAdbKeyPair())
-                    socket = tlsSocket
-                    inStream = DataInputStream(tlsSocket.inputStream)
-                    outStream = tlsSocket.outputStream
-                    input = inStream
-                    output = outStream
-                }
 
-                AdbProtocolConstants.A_AUTH -> {
-                    if (pkt.arg0 != AdbProtocolConstants.AUTH_TOKEN) {
-                        throw IOException("Unexpected ADB AUTH arg0=${pkt.arg0}")
+                    AdbProtocolConstants.A_AUTH -> {
+                        if (pkt.arg0 != AdbProtocolConstants.AUTH_TOKEN) {
+                            throw AdbOperationException(
+                                AdbDiagnosticCategory.AUTH_FAILURE,
+                                "Unexpected ADB AUTH arg0=${pkt.arg0}"
+                            )
+                        }
+                        if (!sentSignature) {
+                            sentSignature = true
+                            val signed = credentialStore.signAuthToken(pkt.payload)
+                            writePacket(outStream, AdbProtocolConstants.A_AUTH, AdbProtocolConstants.AUTH_SIGNATURE, 0, signed)
+                        } else if (!sentPubKey) {
+                            sentPubKey = true
+                            socket?.soTimeout = authApprovalTimeoutMs
+                            onAwaitingTvAuthorization()
+                            val pubPayload = credentialStore.encodeAdbPublicKeyPayload()
+                            writePacket(outStream, AdbProtocolConstants.A_AUTH, AdbProtocolConstants.AUTH_RSAPUBLICKEY, 0, pubPayload)
+                        } else {
+                            throw AdbOperationException(
+                                AdbDiagnosticCategory.AUTH_FAILURE,
+                                "TV rejected ADB authorization after RSAPUBLICKEY exchange."
+                            )
+                        }
                     }
-                    if (!sentSignature) {
-                        sentSignature = true
-                        val signed = credentialStore.signAuthToken(pkt.payload)
-                        writePacket(outStream, AdbProtocolConstants.A_AUTH, AdbProtocolConstants.AUTH_SIGNATURE, 0, signed)
-                    } else if (!sentPubKey) {
-                        sentPubKey = true
-                        socket?.soTimeout = authApprovalTimeoutMs
-                        onAwaitingTvAuthorization()
-                        val pubPayload = credentialStore.encodeAdbPublicKeyPayload()
-                        writePacket(outStream, AdbProtocolConstants.A_AUTH, AdbProtocolConstants.AUTH_RSAPUBLICKEY, 0, pubPayload)
-                    } else {
-                        throw IOException("ADB authentication rejected after RSAPUBLICKEY exchange")
+
+                    AdbProtocolConstants.A_CNXN -> {
+                        banner = pkt.payload.toString(Charsets.UTF_8).trimEnd('\u0000')
+                        socket?.soTimeout = commandReadTimeoutMs
+                        handshakeCompleted.set(true)
+                        return
                     }
-                }
 
-                AdbProtocolConstants.A_CNXN -> {
-                    banner = pkt.payload.toString(Charsets.UTF_8).trimEnd('\u0000')
-                    socket?.soTimeout = 15_000
-                    return
-                }
-
-                else -> {
-                    throw IOException("Unexpected ADB handshake command: 0x${pkt.command.toString(16)}")
+                    else -> {
+                        throw AdbOperationException(
+                            AdbDiagnosticCategory.AUTH_FAILURE,
+                            "Unexpected ADB handshake command: 0x${pkt.command.toString(16)}"
+                        )
+                    }
                 }
             }
+        } catch (e: SocketTimeoutException) {
+            close()
+            throw AdbOperationException(
+                AdbDiagnosticCategory.CONNECTION_TIMEOUT,
+                "Timed out waiting for TV response or debugging authorization prompt.",
+                e
+            )
+        } catch (e: EOFException) {
+            close()
+            throw AdbOperationException(
+                AdbDiagnosticCategory.AUTH_FAILURE,
+                if (mode == AdbConnectionMode.WIRELESS_DEBUGGING_TLS) {
+                    "TV closed Wireless Debugging TLS connection (pair with 6-digit code first or check Connect port)."
+                } else {
+                    "TV closed ADB handshake connection before completing authorization."
+                },
+                e
+            )
+        } catch (e: Exception) {
+            close()
+            if (e is AdbOperationException) throw e
+            throw AdbOperationException(AdbDiagnosticCategory.TV_UNAVAILABLE, e.message ?: "ADB connection error", e)
         }
     }
 
     override suspend fun openShell(command: String): AdbCommandResult = synchronized(ioLock) {
-        val inStream = input ?: throw IOException("ADB session not connected")
-        val outStream = output ?: throw IOException("ADB session not connected")
+        if (!isConnected) {
+            throw AdbOperationException(AdbDiagnosticCategory.TV_DISCONNECTED, "ADB session is closed or disconnected")
+        }
+        val inStream = input ?: throw AdbOperationException(AdbDiagnosticCategory.TV_DISCONNECTED, "ADB input stream unavailable")
+        val outStream = output ?: throw AdbOperationException(AdbDiagnosticCategory.TV_DISCONNECTED, "ADB output stream unavailable")
         val localId = streamIdCounter.getAndIncrement()
 
-        val target = "shell:$command\u0000".toByteArray(Charsets.UTF_8)
-        writePacket(outStream, AdbProtocolConstants.A_OPEN, localId, 0, target)
+        try {
+            val target = "shell:$command\u0000".toByteArray(Charsets.UTF_8)
+            writePacket(outStream, AdbProtocolConstants.A_OPEN, localId, 0, target)
 
-        var remoteId = 0
-        val stdoutBuf = ByteArrayOutputStream()
+            var remoteId = 0
+            val stdoutBuf = ByteArrayOutputStream()
 
-        while (true) {
-            val pkt = AdbWireCodec.readPacket(inStream)
-            when (pkt.command) {
-                AdbProtocolConstants.A_OKAY -> {
-                    if (pkt.arg1 == localId) {
-                        remoteId = pkt.arg0
-                    }
-                }
-
-                AdbProtocolConstants.A_WRTE -> {
-                    if (pkt.arg1 == localId) {
-                        remoteId = pkt.arg0
-                        stdoutBuf.write(pkt.payload)
-                        writePacket(outStream, AdbProtocolConstants.A_OKAY, localId, remoteId)
-                    }
-                }
-
-                AdbProtocolConstants.A_CLSE -> {
-                    if (pkt.arg1 == localId || (remoteId != 0 && pkt.arg0 == remoteId)) {
-                        if (remoteId != 0) {
-                            writePacket(outStream, AdbProtocolConstants.A_CLSE, localId, remoteId)
+            while (true) {
+                val pkt = AdbWireCodec.readPacket(inStream)
+                when (pkt.command) {
+                    AdbProtocolConstants.A_OKAY -> {
+                        if (pkt.arg1 == localId) {
+                            remoteId = pkt.arg0
                         }
-                        break
                     }
-                }
 
-                else -> {
-                    // Ignore unrelated packets on connection
+                    AdbProtocolConstants.A_WRTE -> {
+                        if (pkt.arg1 == localId) {
+                            remoteId = pkt.arg0
+                            stdoutBuf.write(pkt.payload)
+                            writePacket(outStream, AdbProtocolConstants.A_OKAY, localId, remoteId)
+                        }
+                    }
+
+                    AdbProtocolConstants.A_CLSE -> {
+                        if (pkt.arg1 == localId || (remoteId != 0 && pkt.arg0 == remoteId)) {
+                            if (remoteId != 0) {
+                                writePacket(outStream, AdbProtocolConstants.A_CLSE, localId, remoteId)
+                            }
+                            break
+                        }
+                    }
                 }
             }
-        }
 
-        val text = stdoutBuf.toString(Charsets.UTF_8.name())
-        AdbCommandResult(exitCode = 0, stdout = text)
+            AdbCommandResult(exitCode = 0, stdout = stdoutBuf.toString(Charsets.UTF_8.name()))
+        } catch (e: SocketTimeoutException) {
+            close()
+            throw AdbOperationException(AdbDiagnosticCategory.CONNECTION_TIMEOUT, "Timed out running TV shell command", e)
+        } catch (e: EOFException) {
+            close()
+            throw AdbOperationException(AdbDiagnosticCategory.TV_DISCONNECTED, "TV closed ADB socket during command execution", e)
+        } catch (e: IOException) {
+            close()
+            throw AdbOperationException(AdbDiagnosticCategory.SHELL_FAILURE, e.message ?: "ADB shell I/O failed", e)
+        }
     }
 
     override suspend fun pushFile(remotePath: String, content: ByteArray, mode: Int): AdbCommandResult = synchronized(ioLock) {
-        val inStream = input ?: throw IOException("ADB session not connected")
-        val outStream = output ?: throw IOException("ADB session not connected")
+        if (!isConnected) {
+            throw AdbOperationException(AdbDiagnosticCategory.TV_DISCONNECTED, "ADB session is closed or disconnected")
+        }
+        val inStream = input ?: throw AdbOperationException(AdbDiagnosticCategory.TV_DISCONNECTED, "ADB input stream unavailable")
+        val outStream = output ?: throw AdbOperationException(AdbDiagnosticCategory.TV_DISCONNECTED, "ADB output stream unavailable")
         val localId = streamIdCounter.getAndIncrement()
 
-        writePacket(outStream, AdbProtocolConstants.A_OPEN, localId, 0, "sync:\u0000".toByteArray(Charsets.UTF_8))
-        var remoteId = 0
-        while (remoteId == 0) {
-            val pkt = AdbWireCodec.readPacket(inStream)
-            if (pkt.command == AdbProtocolConstants.A_OKAY && pkt.arg1 == localId) {
-                remoteId = pkt.arg0
-            } else if (pkt.command == AdbProtocolConstants.A_CLSE && pkt.arg1 == localId) {
-                return@synchronized AdbCommandResult(exitCode = 1, stdout = "", stderr = "ADB sync stream closed")
-            }
-        }
-
-        // Send SYNC SEND header: "SEND" + le32(len) + path,mode
-        val spec = "$remotePath,$mode".toByteArray(Charsets.UTF_8)
-        val sendHeader = ByteBuffer.allocate(8 + spec.size).order(ByteOrder.LITTLE_ENDIAN)
-        sendHeader.put("SEND".toByteArray(Charsets.US_ASCII))
-        sendHeader.putInt(spec.size)
-        sendHeader.put(spec)
-        sendSyncChunk(inStream, outStream, localId, remoteId, sendHeader.array())
-
-        // Stream file data in 64KB chunks
-        var offset = 0
-        while (offset < content.size) {
-            val chunkLen = minOf(AdbProtocolConstants.SYNC_MAX_CHUNK, content.size - offset)
-            val dataFrame = ByteBuffer.allocate(8 + chunkLen).order(ByteOrder.LITTLE_ENDIAN)
-            dataFrame.put("DATA".toByteArray(Charsets.US_ASCII))
-            dataFrame.putInt(chunkLen)
-            dataFrame.put(content, offset, chunkLen)
-            sendSyncChunk(inStream, outStream, localId, remoteId, dataFrame.array())
-            offset += chunkLen
-        }
-
-        // Send DONE + mtime
-        val doneFrame = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN)
-        doneFrame.put("DONE".toByteArray(Charsets.US_ASCII))
-        doneFrame.putInt((System.currentTimeMillis() / 1000L).toInt())
-        sendSyncChunk(inStream, outStream, localId, remoteId, doneFrame.array())
-
-        // Read OKAY or FAIL from adbd sync
-        var status = "OKAY"
-        var detail = ""
-        while (true) {
-            val pkt = AdbWireCodec.readPacket(inStream)
-            if (pkt.command == AdbProtocolConstants.A_WRTE && pkt.arg1 == localId) {
-                writePacket(outStream, AdbProtocolConstants.A_OKAY, localId, remoteId)
-                if (pkt.payload.size >= 4) {
-                    status = pkt.payload.copyOfRange(0, 4).toString(Charsets.US_ASCII)
-                    detail = if (pkt.payload.size > 8) pkt.payload.copyOfRange(8, pkt.payload.size).toString(Charsets.UTF_8) else ""
+        try {
+            writePacket(outStream, AdbProtocolConstants.A_OPEN, localId, 0, "sync:\u0000".toByteArray(Charsets.UTF_8))
+            var remoteId = 0
+            while (remoteId == 0) {
+                val pkt = AdbWireCodec.readPacket(inStream)
+                if (pkt.command == AdbProtocolConstants.A_OKAY && pkt.arg1 == localId) {
+                    remoteId = pkt.arg0
+                } else if (pkt.command == AdbProtocolConstants.A_CLSE && pkt.arg1 == localId) {
+                    return@synchronized AdbCommandResult(exitCode = 1, stdout = "", stderr = "ADB sync stream closed")
                 }
-                break
-            } else if (pkt.command == AdbProtocolConstants.A_CLSE && pkt.arg1 == localId) {
-                break
             }
-        }
 
-        writePacket(outStream, AdbProtocolConstants.A_CLSE, localId, remoteId)
-        if (status == "OKAY") {
-            AdbCommandResult(exitCode = 0, stdout = "Pushed ${content.size} bytes to $remotePath")
-        } else {
-            AdbCommandResult(exitCode = 1, stdout = "", stderr = "ADB sync $status: $detail")
+            val spec = "$remotePath,$mode".toByteArray(Charsets.UTF_8)
+            val sendHeader = ByteBuffer.allocate(8 + spec.size).order(ByteOrder.LITTLE_ENDIAN)
+            sendHeader.put("SEND".toByteArray(Charsets.US_ASCII))
+            sendHeader.putInt(spec.size)
+            sendHeader.put(spec)
+            sendSyncChunk(inStream, outStream, localId, remoteId, sendHeader.array())
+
+            var offset = 0
+            while (offset < content.size) {
+                val chunkLen = minOf(AdbProtocolConstants.SYNC_MAX_CHUNK, content.size - offset)
+                val dataFrame = ByteBuffer.allocate(8 + chunkLen).order(ByteOrder.LITTLE_ENDIAN)
+                dataFrame.put("DATA".toByteArray(Charsets.US_ASCII))
+                dataFrame.putInt(chunkLen)
+                dataFrame.put(content, offset, chunkLen)
+                sendSyncChunk(inStream, outStream, localId, remoteId, dataFrame.array())
+                offset += chunkLen
+            }
+
+            val doneFrame = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN)
+            doneFrame.put("DONE".toByteArray(Charsets.US_ASCII))
+            doneFrame.putInt((System.currentTimeMillis() / 1000L).toInt())
+            sendSyncChunk(inStream, outStream, localId, remoteId, doneFrame.array())
+
+            var status = "FAIL"
+            var detail = "Sync ended without OKAY confirmation"
+            while (true) {
+                val pkt = AdbWireCodec.readPacket(inStream)
+                if (pkt.command == AdbProtocolConstants.A_WRTE && pkt.arg1 == localId) {
+                    writePacket(outStream, AdbProtocolConstants.A_OKAY, localId, remoteId)
+                    if (pkt.payload.size >= 4) {
+                        status = pkt.payload.copyOfRange(0, 4).toString(Charsets.US_ASCII)
+                        detail = if (pkt.payload.size > 8) pkt.payload.copyOfRange(8, pkt.payload.size).toString(Charsets.UTF_8) else ""
+                    }
+                    break
+                } else if (pkt.command == AdbProtocolConstants.A_CLSE && pkt.arg1 == localId) {
+                    break
+                }
+            }
+
+            writePacket(outStream, AdbProtocolConstants.A_CLSE, localId, remoteId)
+            if (status == "OKAY") {
+                AdbCommandResult(exitCode = 0, stdout = "Pushed ${content.size} bytes to $remotePath")
+            } else {
+                AdbCommandResult(exitCode = 1, stdout = "", stderr = "ADB sync $status: $detail")
+            }
+        } catch (e: SocketTimeoutException) {
+            close()
+            throw AdbOperationException(AdbDiagnosticCategory.CONNECTION_TIMEOUT, "File push timed out", e)
+        } catch (e: EOFException) {
+            close()
+            throw AdbOperationException(AdbDiagnosticCategory.TV_DISCONNECTED, "TV closed ADB socket during file push", e)
+        } catch (e: IOException) {
+            close()
+            throw AdbOperationException(AdbDiagnosticCategory.FILE_TRANSFER_FAILURE, e.message ?: "File push failed", e)
         }
+    }
+
+    override suspend fun pullFile(remotePath: String): ByteArray = synchronized(ioLock) {
+        if (!isConnected) {
+            throw AdbOperationException(AdbDiagnosticCategory.TV_DISCONNECTED, "ADB session is closed or disconnected")
+        }
+        val inStream = input ?: throw AdbOperationException(AdbDiagnosticCategory.TV_DISCONNECTED, "ADB input stream unavailable")
+        val outStream = output ?: throw AdbOperationException(AdbDiagnosticCategory.TV_DISCONNECTED, "ADB output stream unavailable")
+        val localId = streamIdCounter.getAndIncrement()
+
+        try {
+            writePacket(outStream, AdbProtocolConstants.A_OPEN, localId, 0, "sync:\u0000".toByteArray(Charsets.UTF_8))
+            var remoteId = 0
+            while (remoteId == 0) {
+                val pkt = AdbWireCodec.readPacket(inStream)
+                if (pkt.command == AdbProtocolConstants.A_OKAY && pkt.arg1 == localId) {
+                    remoteId = pkt.arg0
+                } else if (pkt.command == AdbProtocolConstants.A_CLSE && pkt.arg1 == localId) {
+                    throw AdbOperationException(AdbDiagnosticCategory.FILE_TRANSFER_FAILURE, "ADB sync stream closed opening RECV")
+                }
+            }
+
+            val pathBytes = remotePath.toByteArray(Charsets.UTF_8)
+            val recvFrame = ByteBuffer.allocate(8 + pathBytes.size).order(ByteOrder.LITTLE_ENDIAN)
+            recvFrame.put("RECV".toByteArray(Charsets.US_ASCII))
+            recvFrame.putInt(pathBytes.size)
+            recvFrame.put(pathBytes)
+            sendSyncChunk(inStream, outStream, localId, remoteId, recvFrame.array())
+
+            val rawSyncBytes = ByteArrayOutputStream()
+            while (true) {
+                val pkt = AdbWireCodec.readPacket(inStream)
+                if (pkt.command == AdbProtocolConstants.A_WRTE && pkt.arg1 == localId) {
+                    rawSyncBytes.write(pkt.payload)
+                    writePacket(outStream, AdbProtocolConstants.A_OKAY, localId, remoteId)
+
+                    val accumulated = rawSyncBytes.toByteArray()
+                    val parsed = parseSyncRecvFrames(accumulated)
+                    if (parsed != null) {
+                        writePacket(outStream, AdbProtocolConstants.A_CLSE, localId, remoteId)
+                        return@synchronized parsed
+                    }
+                    if (accumulated.size > AdbProtocolConstants.MAX_PULL_FILE_BYTES) {
+                        throw AdbOperationException(AdbDiagnosticCategory.FILE_TRANSFER_FAILURE, "Remote file exceeds max allowed pull size")
+                    }
+                } else if (pkt.command == AdbProtocolConstants.A_CLSE && pkt.arg1 == localId) {
+                    val parsed = parseSyncRecvFrames(rawSyncBytes.toByteArray())
+                    if (parsed != null) return@synchronized parsed
+                    throw AdbOperationException(AdbDiagnosticCategory.FILE_TRANSFER_FAILURE, "Remote file transfer closed before DONE")
+                }
+            }
+            @Suppress("UNREACHABLE_CODE")
+            ByteArray(0)
+        } catch (e: SocketTimeoutException) {
+            close()
+            throw AdbOperationException(AdbDiagnosticCategory.CONNECTION_TIMEOUT, "Timed out reading file from TV", e)
+        } catch (e: EOFException) {
+            close()
+            throw AdbOperationException(AdbDiagnosticCategory.TV_DISCONNECTED, "TV closed ADB socket during file read", e)
+        } catch (e: IOException) {
+            if (e is AdbOperationException) throw e
+            close()
+            throw AdbOperationException(AdbDiagnosticCategory.FILE_TRANSFER_FAILURE, e.message ?: "File read failed", e)
+        }
+    }
+
+    private fun parseSyncRecvFrames(raw: ByteArray): ByteArray? {
+        val out = ByteArrayOutputStream()
+        var idx = 0
+        while (idx + 8 <= raw.size) {
+            val tag = raw.copyOfRange(idx, idx + 4).toString(Charsets.US_ASCII)
+            val len = ByteBuffer.wrap(raw, idx + 4, 4).order(ByteOrder.LITTLE_ENDIAN).getInt()
+            if (len < 0 || len > AdbProtocolConstants.MAX_PULL_FILE_BYTES) {
+                throw AdbOperationException(AdbDiagnosticCategory.FILE_TRANSFER_FAILURE, "Invalid sync frame length: $len")
+            }
+            if (idx + 8 + len > raw.size) {
+                return null // Need more ADB WRTE packets for this DATA frame
+            }
+            when (tag) {
+                "DATA" -> out.write(raw, idx + 8, len)
+                "DONE" -> return out.toByteArray()
+                "FAIL" -> {
+                    val msg = raw.copyOfRange(idx + 8, idx + 8 + len).toString(Charsets.UTF_8)
+                    throw AdbOperationException(AdbDiagnosticCategory.FILE_TRANSFER_FAILURE, "ADB RECV FAIL: $msg")
+                }
+                else -> throw AdbOperationException(AdbDiagnosticCategory.FILE_TRANSFER_FAILURE, "Unexpected sync tag '$tag'")
+            }
+            idx += 8 + len
+        }
+        return null
     }
 
     private fun sendSyncChunk(
@@ -390,6 +544,8 @@ class AdbTcpSession(
     }
 
     override fun close() {
+        closedFlag.set(true)
+        handshakeCompleted.set(false)
         try {
             socket?.close()
         } catch (_: Exception) {

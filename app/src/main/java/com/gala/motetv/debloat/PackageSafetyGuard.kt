@@ -1,11 +1,12 @@
 package com.gala.motetv.debloat
 
 import com.gala.motetv.adb.TvDeviceInfo
+import com.gala.motetv.tvhome.CleanYourTvConstants
 
 /**
  * Enforces CleanYourTV safety invariants before scanning recommendations or executing ADB changes.
- * Specifically guards against the Xiaomi Mi TV Stick Issue #884 brick scenario and prevents disabling
- * core OS, TV input/HDMI, Bluetooth, remote v2 services, keyboards, Play services, or active HOME.
+ * Specifically guards against the Xiaomi Mi TV Stick Issue #884 brick scenario, prevents cross-OEM
+ * catalog bleed, and blocks disabling OS, SystemUI, Accessibility, IME, Remote, Play, Network, or active HOME.
  */
 object PackageSafetyGuard {
 
@@ -36,7 +37,10 @@ object PackageSafetyGuard {
         "hdmicec",
         "keyguard",
         "remotecontrol",
-        "tv.remote.service"
+        "tv.remote.service",
+        "talkback",
+        "switchaccess",
+        "setupwraith"
     )
 
     data class SafetyDecision(
@@ -53,10 +57,10 @@ object PackageSafetyGuard {
 
         val lower = packageName.lowercase()
         if (BLOCKED_PREFIXES.any { lower.startsWith(it) }) {
-            return true to "Essential Android TV / overlay / input system component — disabling risks bootloop or broken hardware."
+            return true to "Essential Android TV / overlay / input / network component — disabling risks bootloop or lost recovery."
         }
         if (BLOCKED_SUBSTRINGS.any { lower.contains(it) }) {
-            return true to "Protected core permission, HDMI/TV input, or remote control dependency."
+            return true to "Protected core permission, accessibility, setup, HDMI/TV input, or remote control dependency."
         }
         return false to null
     }
@@ -77,7 +81,7 @@ object PackageSafetyGuard {
         if (packageName == deviceInfo.currentHomePackage) {
             val safeToDisableOldHome = verifiedReplacementHomeInstalled &&
                 verifiedReplacementHomeActive &&
-                packageName != "com.gathin.tvhome"
+                packageName != CleanYourTvConstants.LAUNCHER_PACKAGE
             if (!safeToDisableOldHome) {
                 return SafetyDecision(
                     allowed = false,
@@ -87,19 +91,21 @@ object PackageSafetyGuard {
             }
         }
 
-        // Prevent disabling the only launcher if CleanYourTV Home isn't installed
-        if ((packageName == "com.google.android.tvlauncher" || packageName == "com.google.android.apps.tv.launcherx") &&
-            (!verifiedReplacementHomeInstalled || !"com.gathin.tvhome".let { installedPackages.contains(it) })
+        // Prevent disabling stock launchers if CleanYourTV Home isn't verified installed & active
+        if (CleanYourTvPackageCatalog.STOCK_LAUNCHER_PACKAGES.contains(packageName) &&
+            (!verifiedReplacementHomeInstalled ||
+                !verifiedReplacementHomeActive ||
+                !installedPackages.contains(CleanYourTvConstants.LAUNCHER_PACKAGE))
         ) {
             return SafetyDecision(
                 allowed = false,
                 requiresExplicitOptionalPrompt = false,
-                reason = "Cannot disable stock Android TV launcher without verified replacement launcher installed."
+                reason = "Cannot disable stock Android TV launcher without verified active replacement launcher installed."
             )
         }
 
         val known = CleanYourTvPackageCatalog.KNOWN_BY_PACKAGE[packageName]
-        if (known != null && known.requiresOptionalPrompt) {
+        if (known != null && (known.requiresOptionalPrompt || !matchesPackageDeviceCatalog(known, deviceInfo))) {
             return SafetyDecision(
                 allowed = true,
                 requiresExplicitOptionalPrompt = true,
@@ -111,7 +117,41 @@ object PackageSafetyGuard {
     }
 
     fun matchesVerifiedXiaomiStickModel(deviceInfo: TvDeviceInfo): Boolean {
+        if (!deviceInfo.isXiaomiDevice) return false
         val id = "${deviceInfo.model} ${deviceInfo.deviceName} ${deviceInfo.productBoard}".lowercase()
         return CleanYourTvPackageCatalog.VERIFIED_XIAOMI_STICK_IDENTIFIERS.any { id.contains(it) }
+    }
+
+    /**
+     * Returns true ONLY if [known] is explicitly verified for [deviceInfo]'s detected manufacturer
+     * AND exact model metadata. Cross-manufacturer packages (e.g., Sony/TCL on Xiaomi) and unknown
+     * models return false so they default cleanly to manual review.
+     */
+    fun matchesPackageDeviceCatalog(known: KnownPackageDescriptor, deviceInfo: TvDeviceInfo): Boolean {
+        val detectedMfg = detectedManufacturerKey(deviceInfo)
+
+        if (known.supportedManufacturers.isNotEmpty()) {
+            val mfgMatched = known.supportedManufacturers.any { expectedMfg ->
+                when (expectedMfg.lowercase()) {
+                    "xiaomi" -> deviceInfo.isXiaomiDevice || detectedMfg == "xiaomi"
+                    else -> detectedMfg == expectedMfg.lowercase()
+                }
+            }
+            if (!mfgMatched) return false
+        }
+
+        if (deviceInfo.isXiaomiDevice) {
+            if (known.verifiedXiaomiStickModels.isEmpty()) return false
+            val id = "${deviceInfo.model} ${deviceInfo.deviceName} ${deviceInfo.productBoard}".lowercase()
+            return known.verifiedXiaomiStickModels.any { id.contains(it.lowercase()) }
+        }
+
+        // Non-Xiaomi or unknown manufacturer: require explicit manufacturer verification on the package
+        return known.supportedManufacturers.isNotEmpty() && detectedMfg.isNotBlank() && detectedMfg != "unknown"
+    }
+
+    private fun detectedManufacturerKey(deviceInfo: TvDeviceInfo): String {
+        if (deviceInfo.isXiaomiDevice) return "xiaomi"
+        return deviceInfo.manufacturer.trim().lowercase()
     }
 }

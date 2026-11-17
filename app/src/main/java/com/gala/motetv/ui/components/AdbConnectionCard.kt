@@ -1,7 +1,6 @@
 package com.gala.motetv.ui.components
 
 import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -12,7 +11,6 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -22,7 +20,10 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.gala.motetv.adb.AdbConnectionManager
 import com.gala.motetv.adb.AdbConnectionMode
 import com.gala.motetv.adb.AdbConnectionState
+import com.gala.motetv.adb.AdbDiagnosticCategory
+import com.gala.motetv.adb.AdbPairingState
 import com.gala.motetv.ui.theme.*
+import kotlinx.coroutines.launch
 
 @Composable
 fun AdbConnectionCard(
@@ -31,7 +32,10 @@ fun AdbConnectionCard(
     onConnectedCallback: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
+    val scope = rememberCoroutineScope()
     val adbState by adbManager.connectionState.collectAsStateWithLifecycle()
+    val pairingState by adbManager.pairingState.collectAsStateWithLifecycle()
+    val diagnosticCategory by adbManager.diagnosticCategory.collectAsStateWithLifecycle()
     val discoveredServices by adbManager.discoveredServices.collectAsStateWithLifecycle()
     val isDiscovering by adbManager.isDiscovering.collectAsStateWithLifecycle()
     val savedEndpoint by adbManager.savedEndpoint.collectAsStateWithLifecycle()
@@ -54,6 +58,8 @@ fun AdbConnectionCard(
             }
         )
     }
+    var pairingPortInput by remember { mutableStateOf("") }
+    var pairingCodeInput by remember { mutableStateOf("") }
     var showPairingHelp by remember { mutableStateOf(false) }
 
     LaunchedEffect(adbState) {
@@ -93,7 +99,7 @@ fun AdbConnectionCard(
                         is AdbConnectionState.Connected -> "Connected to ${st.host}:${st.port}"
                         is AdbConnectionState.Connecting -> "Connecting to ${st.host}:${st.port}..."
                         is AdbConnectionState.AwaitingTvAuthorization -> "Approve prompt on TV (Key ${st.keyFingerprint.take(11)}...)"
-                        is AdbConnectionState.Error -> st.userMessage
+                        is AdbConnectionState.Error -> "${st.category.label}: ${st.userMessage}"
                         is AdbConnectionState.Disconnected -> "Disconnected — Remote v2 (6466) stays unaffected"
                     }
                     Text(
@@ -167,7 +173,7 @@ fun AdbConnectionCard(
                         Icon(
                             imageVector = Icons.Default.Security,
                             contentDescription = null,
-                            tint = StatusWarningAmber,
+                            tint = if (adbManager.pairingCapability.isNativeSpake2Supported) ElectricBlueLight else StatusWarningAmber,
                             modifier = Modifier.size(18.dp)
                         )
                         Spacer(modifier = Modifier.width(8.dp))
@@ -180,7 +186,7 @@ fun AdbConnectionCard(
                 }
             }
 
-            // Host & Port Inputs
+            // Host & Connect Port Inputs
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -205,8 +211,12 @@ fun AdbConnectionCard(
                 OutlinedTextField(
                     value = portInput,
                     onValueChange = { portInput = it.filter { ch -> ch.isDigit() }.take(5) },
-                    label = { Text("Port") },
-                    placeholder = { Text("5555") },
+                    label = {
+                        Text(if (selectedMode == AdbConnectionMode.WIRELESS_DEBUGGING_TLS) "Connect Port" else "Port")
+                    },
+                    placeholder = {
+                        Text(if (selectedMode == AdbConnectionMode.WIRELESS_DEBUGGING_TLS) "e.g. 39421" else "5555")
+                    },
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     colors = OutlinedTextFieldDefaults.colors(
@@ -219,6 +229,105 @@ fun AdbConnectionCard(
                         .weight(1f)
                         .testTag("adb_port_input")
                 )
+            }
+
+            // Step 1: Wireless Debugging Pairing Code Section (Android 11+ / API 30+)
+            if (selectedMode == AdbConnectionMode.WIRELESS_DEBUGGING_TLS && adbManager.pairingCapability.isNativeSpake2Supported) {
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = GlassSurfacePressed,
+                    border = BorderStroke(1.dp, ElectricBlueLight.copy(alpha = 0.35f)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            text = "STEP 1: WIRELESS DEBUGGING PAIRING (ONE-TIME)",
+                            style = Typography.labelSmall.copy(fontWeight = FontWeight.Bold, letterSpacing = 0.6.sp),
+                            color = ElectricBlueLight
+                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            OutlinedTextField(
+                                value = pairingPortInput,
+                                onValueChange = { pairingPortInput = it.filter { ch -> ch.isDigit() }.take(5) },
+                                label = { Text("Pair Port") },
+                                placeholder = { Text("37xxx") },
+                                singleLine = true,
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedTextColor = TextPrimary,
+                                    unfocusedTextColor = TextPrimary,
+                                    focusedBorderColor = ElectricBlueLight,
+                                    unfocusedBorderColor = GlassBorderStrong
+                                ),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("adb_pair_port_input")
+                            )
+
+                            OutlinedTextField(
+                                value = pairingCodeInput,
+                                onValueChange = { pairingCodeInput = it.filter { ch -> ch.isDigit() }.take(6) },
+                                label = { Text("6-Digit Code") },
+                                placeholder = { Text("123456") },
+                                singleLine = true,
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedTextColor = TextPrimary,
+                                    unfocusedTextColor = TextPrimary,
+                                    focusedBorderColor = ElectricBlueLight,
+                                    unfocusedBorderColor = GlassBorderStrong
+                                ),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("adb_pair_code_input")
+                            )
+
+                            val isPairingNow = pairingState is AdbPairingState.Pairing
+                            Button(
+                                onClick = {
+                                    val pairPort = pairingPortInput.toIntOrNull() ?: 0
+                                    scope.launch {
+                                        adbManager.pairWirelessDebugging(hostInput, pairPort, pairingCodeInput)
+                                    }
+                                },
+                                enabled = !isPairingNow && hostInput.isNotBlank() && pairingCodeInput.length == 6,
+                                colors = ButtonDefaults.buttonColors(containerColor = ElectricBluePrimary),
+                                shape = RoundedCornerShape(12.dp),
+                                modifier = Modifier
+                                    .defaultMinSize(minHeight = 48.dp)
+                                    .testTag("adb_pair_submit_button")
+                            ) {
+                                Text(if (isPairingNow) "..." else "Pair", style = Typography.labelLarge)
+                            }
+                        }
+
+                        when (val pState = pairingState) {
+                            is AdbPairingState.Pairing -> Text(
+                                text = "Pairing with ${pState.host}:${pState.pairingPort}...",
+                                style = Typography.labelSmall,
+                                color = StatusWarningAmber
+                            )
+                            is AdbPairingState.Paired -> Text(
+                                text = "${pState.detail} Enter Connect Port above & tap Connect ADB.",
+                                style = Typography.labelSmall,
+                                color = StatusSuccessGreen
+                            )
+                            is AdbPairingState.Failed -> Text(
+                                text = "${pState.category.label}: ${pState.message}",
+                                style = Typography.labelSmall,
+                                color = StatusErrorRed
+                            )
+                            AdbPairingState.Idle -> Unit
+                        }
+                    }
+                }
             }
 
             // Discovered mDNS Wireless Debugging services
@@ -238,8 +347,12 @@ fun AdbConnectionCard(
                                 .fillMaxWidth()
                                 .clickable {
                                     hostInput = svc.host
-                                    portInput = svc.port.toString()
                                     selectedMode = AdbConnectionMode.WIRELESS_DEBUGGING_TLS
+                                    if (svc.isPairingService) {
+                                        pairingPortInput = svc.port.toString()
+                                    } else {
+                                        portInput = svc.port.toString()
+                                    }
                                 }
                         ) {
                             Row(
@@ -253,7 +366,7 @@ fun AdbConnectionCard(
                                     color = TextPrimary
                                 )
                                 Text(
-                                    text = if (svc.isPairingService) "Pairing" else "Connect",
+                                    text = if (svc.isPairingService) "Pairing Port" else "Connect Port",
                                     style = Typography.labelSmall.copy(fontWeight = FontWeight.Bold),
                                     color = ElectricBlueLight
                                 )
@@ -298,7 +411,8 @@ fun AdbConnectionCard(
                         if (isConnected) {
                             adbManager.disconnect()
                         } else {
-                            val parsedPort = portInput.toIntOrNull() ?: 5555
+                            val defaultPort = if (selectedMode == AdbConnectionMode.NETWORK_LEGACY_5555) 5555 else 0
+                            val parsedPort = portInput.toIntOrNull() ?: defaultPort
                             adbManager.connect(hostInput, parsedPort, selectedMode)
                         }
                     },
@@ -324,10 +438,15 @@ fun AdbConnectionCard(
                 }
             }
 
+            val footerText = if (diagnosticCategory != AdbDiagnosticCategory.NONE && !diagnosticDetail.startsWith(diagnosticCategory.label)) {
+                "[${diagnosticCategory.label}] $diagnosticDetail"
+            } else {
+                diagnosticDetail
+            }
             Text(
-                text = diagnosticDetail,
+                text = footerText,
                 style = Typography.labelSmall,
-                color = TextMuted
+                color = if (diagnosticCategory != AdbDiagnosticCategory.NONE) StatusWarningAmber else TextMuted
             )
         }
     }

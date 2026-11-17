@@ -2,6 +2,7 @@ package com.gala.motetv.debloat
 
 import com.gala.motetv.adb.AdbConnectionManager
 import com.gala.motetv.adb.TvDeviceInfo
+import com.gala.motetv.tvhome.CleanYourTvConstants
 
 class TvPackageScanner(
     private val adbManager: AdbConnectionManager,
@@ -32,16 +33,17 @@ class TvPackageScanner(
         modifiedByMoteTv: Set<String> = emptySet(),
         timestampMs: Long = timeProvider()
     ): TvScanResult {
-        val exactXiaomiMatch = deviceInfo.isXiaomiDevice && PackageSafetyGuard.matchesVerifiedXiaomiStickModel(deviceInfo)
-        val isUnverifiedXiaomiVariant = deviceInfo.isXiaomiDevice && !exactXiaomiMatch
+        val exactXiaomiStickMatch = deviceInfo.isXiaomiDevice &&
+            PackageSafetyGuard.matchesVerifiedXiaomiStickModel(deviceInfo)
+        val isUnverifiedXiaomiVariant = deviceInfo.isXiaomiDevice && !exactXiaomiStickMatch
 
         val notice = when {
-            deviceInfo.isXiaomiMiTvStickOriginal || exactXiaomiMatch ->
-                "Verified Xiaomi Mi TV Stick (${deviceInfo.model} / ${deviceInfo.deviceName}, SDK ${deviceInfo.sdkVersion}). Issue #884 boot-critical packages are strictly locked."
+            exactXiaomiStickMatch ->
+                "Verified Xiaomi Mi TV Stick (${deviceInfo.model} / ${deviceInfo.deviceName}, SDK ${deviceInfo.sdkVersion}). Issue #884 & recovery components are strictly locked; each package is verified per-model."
             isUnverifiedXiaomiVariant ->
-                "Unverified Xiaomi variant (${deviceInfo.model} / ${deviceInfo.deviceName}). Generic Xiaomi lists are NOT auto-approved — inspect and select each package individually."
+                "Unverified Xiaomi variant (${deviceInfo.model} / ${deviceInfo.deviceName}). Generic Xiaomi lists are NOT auto-approved — all non-core packages require manual review."
             else ->
-                "Detected ${deviceInfo.manufacturer} ${deviceInfo.model} (Android ${deviceInfo.androidVersion}, SDK ${deviceInfo.sdkVersion}). Only verified catalog items are marked Recommended; unknown packages stay untouched."
+                "Model '${deviceInfo.manufacturer} ${deviceInfo.model}' (Android ${deviceInfo.androidVersion}, SDK ${deviceInfo.sdkVersion}) has no exact Xiaomi Stick catalog match — defaulting packages to manual review."
         }
 
         val installedSet = installedPackages.toSet()
@@ -51,7 +53,6 @@ class TvPackageScanner(
                 isEnabled = !disabledPackages.contains(pkg),
                 deviceInfo = deviceInfo,
                 installedSet = installedSet,
-                isUnverifiedXiaomiVariant = isUnverifiedXiaomiVariant,
                 modified = modifiedByMoteTv.contains(pkg)
             )
         }.sortedWith(
@@ -63,7 +64,7 @@ class TvPackageScanner(
             scannedAtMs = timestampMs,
             deviceInfo = deviceInfo,
             packages = scanned,
-            hasExactModelCatalogMatch = !isUnverifiedXiaomiVariant,
+            hasExactModelCatalogMatch = exactXiaomiStickMatch,
             modelSafetyNotice = notice
         )
     }
@@ -73,7 +74,6 @@ class TvPackageScanner(
         isEnabled: Boolean,
         deviceInfo: TvDeviceInfo,
         installedSet: Set<String>,
-        isUnverifiedXiaomiVariant: Boolean,
         modified: Boolean
     ): ScannedPackage {
         val (alwaysBlocked, blockMsg) = PackageSafetyGuard.isAlwaysBlockedPackage(packageName)
@@ -98,18 +98,26 @@ class TvPackageScanner(
 
         val known = CleanYourTvPackageCatalog.KNOWN_BY_PACKAGE[packageName]
         if (known != null) {
-            // Protect active HOME launcher unless CleanYourTV Home is also installed and verified active
-            val activeHomeBlocked = isCurrentHome
+            val isStockLauncher = CleanYourTvPackageCatalog.STOCK_LAUNCHER_PACKAGES.contains(packageName)
+            val replacementReady = installedSet.contains(CleanYourTvConstants.LAUNCHER_PACKAGE) &&
+                deviceInfo.currentHomePackage == CleanYourTvConstants.LAUNCHER_PACKAGE
+            val activeHomeBlocked = isCurrentHome || (isStockLauncher && !replacementReady)
+
+            val perPackageDeviceMatch = PackageSafetyGuard.matchesPackageDeviceCatalog(known, deviceInfo)
             val effectiveRec = when {
                 activeHomeBlocked -> DebloatRecommendation.NEVER_DISABLE
-                isUnverifiedXiaomiVariant && known.recommendation == DebloatRecommendation.SAFE_TO_DISABLE ->
+                known.recommendation == DebloatRecommendation.SAFE_TO_DISABLE && !perPackageDeviceMatch ->
                     DebloatRecommendation.OPTIONAL_ASK_USER
                 else -> known.recommendation
             }
+            val needsPrompt = known.requiresOptionalPrompt ||
+                (known.recommendation == DebloatRecommendation.SAFE_TO_DISABLE && !perPackageDeviceMatch)
+
             val effectiveReason = when {
-                activeHomeBlocked -> "${known.reason} Currently active HOME launcher — install and verify replacement Home first."
-                isUnverifiedXiaomiVariant && known.recommendation == DebloatRecommendation.SAFE_TO_DISABLE ->
-                    "${known.reason} (Approve individually for ${deviceInfo.model}.)"
+                activeHomeBlocked ->
+                    "${known.reason} Protected for HOME recovery until CleanYourTV Home is installed and verified active."
+                known.recommendation == DebloatRecommendation.SAFE_TO_DISABLE && !perPackageDeviceMatch ->
+                    "${known.reason} Not explicitly verified for ${deviceInfo.manufacturer} ${deviceInfo.model} — manual review required."
                 else -> known.reason
             }
 
@@ -121,9 +129,9 @@ class TvPackageScanner(
                 recommendation = effectiveRec,
                 reason = effectiveReason,
                 riskLevel = if (activeHomeBlocked) RiskLevel.CRITICAL_BLOCKED else known.riskLevel,
-                requiresOptionalPrompt = known.requiresOptionalPrompt || isUnverifiedXiaomiVariant,
+                requiresOptionalPrompt = needsPrompt,
                 isBlockedFromDisable = activeHomeBlocked,
-                blockReason = if (activeHomeBlocked) "Active HOME launcher cannot be disabled here." else null,
+                blockReason = if (activeHomeBlocked) "Protected HOME launcher cannot be disabled here." else null,
                 isOriginalHomeLauncher = isCurrentHome,
                 modifiedByMoteTv = modified
             )
