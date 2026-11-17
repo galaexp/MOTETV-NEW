@@ -181,20 +181,54 @@ class CleanYourTvLauncherManager(
         val enableRes = adbManager.enablePackage(origPkg)
         if (enableRes.isFailure) {
             val err = enableRes.exceptionOrNull()!!
-            return Result.failure(IllegalStateException("Failed to enable original launcher '$origPkg' before setting HOME: ${err.message}", err))
+            val msg = "Failed to enable original launcher '$origPkg' before setting HOME: ${err.message}"
+            _launcherStatus.value = _launcherStatus.value.copy(statusDetail = msg)
+            return Result.failure(IllegalStateException(msg, err))
+        }
+        val enableCmd = enableRes.getOrThrow()
+        if (!enableCmd.isSuccess) {
+            val detail = enableCmd.stderr.ifBlank { enableCmd.stdout }.ifBlank { "exit code ${enableCmd.exitCode}" }
+            val msg = "Failed to enable original launcher '$origPkg' before setting HOME: $detail"
+            _launcherStatus.value = _launcherStatus.value.copy(statusDetail = msg)
+            return Result.failure(IllegalStateException(msg))
+        }
+
+        val installedAfterEnable = adbManager.listAllPackages().getOrElse { err ->
+            val msg = "Unable to verify installed state of original launcher '$origPkg': ${err.message}"
+            _launcherStatus.value = _launcherStatus.value.copy(statusDetail = msg)
+            return Result.failure(IllegalStateException(msg, err))
+        }
+        if (!installedAfterEnable.contains(origPkg)) {
+            val msg = "Original launcher '$origPkg' is not installed on TV; aborted HOME switch."
+            _launcherStatus.value = _launcherStatus.value.copy(
+                isOriginalHomeAvailable = false,
+                statusDetail = msg
+            )
+            return Result.failure(IllegalStateException(msg))
         }
 
         val disabledAfterEnable = adbManager.listDisabledPackages().getOrElse { err ->
-            return Result.failure(IllegalStateException("Unable to verify enabled state of original launcher '$origPkg': ${err.message}", err))
+            val msg = "Unable to verify enabled state of original launcher '$origPkg': ${err.message}"
+            _launcherStatus.value = _launcherStatus.value.copy(statusDetail = msg)
+            return Result.failure(IllegalStateException(msg, err))
         }
         if (disabledAfterEnable.contains(origPkg)) {
-            return Result.failure(IllegalStateException("Original launcher '$origPkg' remains disabled on TV; aborted HOME switch."))
+            val msg = "Original launcher '$origPkg' remains disabled on TV; aborted HOME switch."
+            _launcherStatus.value = _launcherStatus.value.copy(
+                isOriginalHomeAvailable = false,
+                statusDetail = msg
+            )
+            return Result.failure(IllegalStateException(msg))
         }
 
         val targetComponent = origAct?.takeIf { it.contains('/') } ?: "$origPkg/.MainActivity"
         val setRes = adbManager.setDefaultHomeActivity(targetComponent)
         if (setRes.isFailure) {
-            return Result.failure(setRes.exceptionOrNull()!!)
+            val err = setRes.exceptionOrNull()!!
+            _launcherStatus.value = _launcherStatus.value.copy(
+                statusDetail = "Failed to restore default HOME to '$origPkg': ${err.message}"
+            )
+            return Result.failure(err)
         }
         adbManager.launchHomeChooserOrOpenHome()
 
@@ -202,27 +236,38 @@ class CleanYourTvLauncherManager(
         return if (verified.currentHomePackage == origPkg) {
             Result.success(verified)
         } else {
-            Result.failure(
-                IllegalStateException("Restored command ran, but active HOME still reports '${verified.currentHomePackage}' instead of '$origPkg'.")
-            )
+            val msg = "Restored command ran, but active HOME still reports '${verified.currentHomePackage}' instead of '$origPkg'."
+            _launcherStatus.value = verified.copy(statusDetail = msg)
+            Result.failure(IllegalStateException(msg))
         }
     }
 
     private fun saveOriginalHome(pkg: String, activity: String?) {
         if (pkg.isBlank() || pkg == CleanYourTvConstants.LAUNCHER_PACKAGE) return
-        memoryOrigPkg = pkg
-        memoryOrigAct = activity
-        prefs?.edit()
-            ?.putString(KEY_ORIG_HOME_PKG, pkg)
-            ?.putString(KEY_ORIG_HOME_ACT, activity ?: "")
-            ?.commit()
+        val p = prefs
+        if (p != null) {
+            val committed = p.edit()
+                .putString(KEY_ORIG_HOME_PKG, pkg)
+                .putString(KEY_ORIG_HOME_ACT, activity ?: "")
+                .commit()
+            if (committed) {
+                memoryOrigPkg = pkg
+                memoryOrigAct = activity
+            }
+        } else {
+            memoryOrigPkg = pkg
+            memoryOrigAct = activity
+        }
     }
 
     private fun loadOriginalHome(): Pair<String?, String?> {
         val p = prefs
-        val pkg = p?.getString(KEY_ORIG_HOME_PKG, null)?.ifBlank { null } ?: memoryOrigPkg
-        val act = p?.getString(KEY_ORIG_HOME_ACT, null)?.ifBlank { null } ?: memoryOrigAct
-        return pkg to act
+        if (p != null) {
+            val pkg = p.getString(KEY_ORIG_HOME_PKG, null)?.ifBlank { null }
+            val act = p.getString(KEY_ORIG_HOME_ACT, null)?.ifBlank { null }
+            return pkg to act
+        }
+        return memoryOrigPkg to memoryOrigAct
     }
 
     private fun buildStatusSummary(

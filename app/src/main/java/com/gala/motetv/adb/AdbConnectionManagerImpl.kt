@@ -11,6 +11,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -339,11 +340,14 @@ class AdbConnectionManagerImpl(
         }
     }
 
+    internal fun activePairingJobForTest(): Job? = synchronized(jobLock) { pairingJob }
+
     override fun cancelWirelessPairing() {
-        (wirelessPairingTransport as? NativeWirelessAdbPairing)?.cancelCurrentPairing()
         val activeJob = synchronized(jobLock) {
             val j = pairingJob
-            pairingJob = null
+            if (j != null) {
+                pairingJob = null
+            }
             j
         }
         if (activeJob != null && activeJob.isActive) {
@@ -356,6 +360,7 @@ class AdbConnectionManagerImpl(
             )
             _lastDiagnosticDetail.value = "Pairing Failure: Wireless Debugging pairing cancelled."
         }
+        (wirelessPairingTransport as? NativeWirelessAdbPairing)?.cancelCurrentPairing()
     }
 
     override suspend fun pairWirelessDebugging(
@@ -366,12 +371,8 @@ class AdbConnectionManagerImpl(
         val cleanHost = host.trim()
         val cleanCode = pairingCode.trim()
 
-        synchronized(jobLock) {
-            pairingJob = coroutineContext[Job]
-        }
-
-        // Non-interfering guard: if a pairing attempt is already active, reject immediately WITHOUT
-        // cancelling the active attempt, touching its socket, or altering its state/category.
+        // Non-interfering guard: acquire pairingMutex BEFORE registering pairingJob so a rejected
+        // second attempt NEVER overwrites or clears the active attempt's job reference or state.
         if (!pairingMutex.tryLock()) {
             return@withContext Result.failure(
                 AdbPairingException(
@@ -381,7 +382,13 @@ class AdbConnectionManagerImpl(
             )
         }
 
+        val myJob = coroutineContext[Job]
         try {
+            synchronized(jobLock) {
+                pairingJob = myJob
+            }
+            coroutineContext.ensureActive()
+
             val transport = wirelessPairingTransport
             if (transport == null) {
                 val msg = pairingCapability.explanation
@@ -455,7 +462,7 @@ class AdbConnectionManagerImpl(
             Result.failure(AdbPairingException(cat, msg, e))
         } finally {
             synchronized(jobLock) {
-                if (pairingJob === coroutineContext[Job]) {
+                if (pairingJob === myJob) {
                     pairingJob = null
                 }
             }

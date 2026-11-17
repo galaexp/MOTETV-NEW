@@ -74,9 +74,9 @@ class NativeWirelessAdbPairing(
         const val PEER_INFO_SIZE = 8192
         const val MAX_ENCRYPTED_PAYLOAD = 16_384
 
-        private val CLIENT_NAME = "adb pair client".toByteArray(Charsets.US_ASCII)
-        private val SERVER_NAME = "adb pair server".toByteArray(Charsets.US_ASCII)
-        private val HKDF_INFO = "adb pairing_auth aes-128-gcm key".toByteArray(Charsets.US_ASCII)
+        internal val CLIENT_NAME = "adb pair client".toByteArray(Charsets.US_ASCII)
+        internal val SERVER_NAME = "adb pair server".toByteArray(Charsets.US_ASCII)
+        internal val HKDF_INFO = "adb pairing_auth aes-128-gcm key".toByteArray(Charsets.US_ASCII)
         private const val EKM_LABEL = "adb-label"
         private const val EKM_LENGTH = 64
 

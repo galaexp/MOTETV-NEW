@@ -98,6 +98,12 @@ class DebloatManager(
         val allPkgs = adbManager.listAllPackages().getOrElse { return Result.failure(it) }
         val disabledPkgs = adbManager.listDisabledPackages().getOrElse { return Result.failure(it) }
 
+        if (allPkgs.isEmpty()) {
+            val err = IllegalStateException("TV package list is empty; refusing to create incomplete backup.")
+            _statusMessage.value = "Backup failed — debloat blocked: ${err.message}"
+            return Result.failure(err)
+        }
+
         val record = DebloatBackupRecord(
             backupId = UUID.randomUUID().toString(),
             createdAtMs = timeProvider(),
@@ -112,6 +118,7 @@ class DebloatManager(
         val saved = repository.saveBackup(record)
         if (saved.isFailure) {
             val err = saved.exceptionOrNull()!!
+            _latestBackup.value = repository.getLatestBackup()
             recordOperation(
                 action = DebloatActionType.BACKUP_CREATED,
                 packageName = null,
@@ -123,13 +130,23 @@ class DebloatManager(
             return Result.failure(err)
         }
 
-        // Read-back verification ensures backup is actually readable from persistent store
+        // Read-back verification ensures backup & required metadata are durably readable from persistent store
         val readBack = repository.getLatestBackup()
         if (readBack == null ||
             readBack.backupId != record.backupId ||
-            readBack.allInstalledPackages.size != record.allInstalledPackages.size
+            readBack.createdAtMs != record.createdAtMs ||
+            readBack.deviceInfo.manufacturer != record.deviceInfo.manufacturer ||
+            readBack.deviceInfo.model != record.deviceInfo.model ||
+            readBack.deviceInfo.buildFingerprint != record.deviceInfo.buildFingerprint ||
+            readBack.allInstalledPackages.size != record.allInstalledPackages.size ||
+            readBack.originallyDisabledPackages != record.originallyDisabledPackages ||
+            readBack.originalHomePackage != record.originalHomePackage ||
+            readBack.originalHomeActivity != record.originalHomeActivity ||
+            readBack.intendedDisablePackages != record.intendedDisablePackages ||
+            readBack.modifiedByMoteTvPackages != record.modifiedByMoteTvPackages
         ) {
-            val err = IllegalStateException("Backup verification failed: saved record could not be read back intact.")
+            _latestBackup.value = readBack
+            val err = IllegalStateException("Backup verification failed: saved record or required metadata could not be read back intact.")
             recordOperation(
                 action = DebloatActionType.BACKUP_CREATED,
                 packageName = null,
@@ -227,8 +244,21 @@ class DebloatManager(
                     if (actuallyDisabled) {
                         // Only record packages MoteTV actually changed from enabled -> disabled
                         if (!preExistingDisabled.contains(pkg)) {
-                            repository.markPackageModified(pkg)
+                            val markRes = repository.markPackageModified(pkg)
                             _modifiedPackages.value = repository.getModifiedPackages()
+                            if (markRes.isFailure) {
+                                val err = markRes.exceptionOrNull()!!
+                                val entry = recordOperation(
+                                    action = DebloatActionType.DISABLE_PACKAGE,
+                                    packageName = pkg,
+                                    succeeded = false,
+                                    verifiedState = "PERSIST_FAILED",
+                                    detail = "Stopped: failed to persist modified-package tracking: ${err.message}"
+                                )
+                                batchResults.add(entry)
+                                _statusMessage.value = "Failed to persist modified-package state for $pkg; stopping."
+                                return Result.failure(IllegalStateException("Modified-package persistence failed for $pkg: ${err.message}", err))
+                            }
                         }
                         val note = if (preExistingDisabled.contains(pkg)) {
                             "Already disabled before MoteTV (not claimed as MoteTV change)"
@@ -311,23 +341,30 @@ class DebloatManager(
             val failedPackages = mutableListOf<String>()
             for (pkg in packages) {
                 val cmdErr = commandErrors[pkg]
-                val restored = cmdErr == null && !stillDisabled.contains(pkg)
-                if (restored) {
-                    repository.unmarkPackageModified(pkg)
+                val restoredOnTv = cmdErr == null && !stillDisabled.contains(pkg)
+                var persistErr: String? = null
+                if (restoredOnTv) {
+                    val unmarkRes = repository.unmarkPackageModified(pkg)
+                    if (unmarkRes.isFailure) {
+                        persistErr = "Package enabled on TV, but failed to persist tracking update: ${unmarkRes.exceptionOrNull()?.message}"
+                        failedPackages.add(pkg)
+                    }
                 } else {
                     failedPackages.add(pkg)
                 }
+                val succeeded = restoredOnTv && persistErr == null
                 results.add(
                     recordOperation(
                         action = DebloatActionType.RESTORE_PACKAGE,
                         packageName = pkg,
-                        succeeded = restored,
+                        succeeded = succeeded,
                         verifiedState = when {
                             cmdErr != null -> "ENABLE_FAILED"
-                            restored -> "ENABLED"
+                            persistErr != null -> "PERSIST_FAILED"
+                            restoredOnTv -> "ENABLED"
                             else -> "STILL_DISABLED"
                         },
-                        detail = cmdErr ?: if (restored) "Restored via pm enable and verified" else "Package still listed disabled after pm enable"
+                        detail = cmdErr ?: persistErr ?: if (restoredOnTv) "Restored via pm enable and verified" else "Package still listed disabled after pm enable"
                     )
                 )
             }

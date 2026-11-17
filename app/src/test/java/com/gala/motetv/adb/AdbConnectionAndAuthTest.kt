@@ -430,9 +430,231 @@ class AdbConnectionAndAuthTest {
             assertTrue("First attempt must finish cleanly: ${firstRes.exceptionOrNull()}", firstRes.isSuccess)
             assertTrue(manager.pairingState.value is AdbPairingState.Paired)
             assertEquals(AdbDiagnosticCategory.NONE, manager.diagnosticCategory.value)
+            assertEquals(null, manager.activePairingJobForTest())
         } finally {
             testScope.coroutineContext[kotlinx.coroutines.Job]?.cancel()
         }
+    }
+
+    @Test
+    fun rejectedSecondAttemptPreservesFirstPairingJobCancellingTerminatesFirstAndSubsequentSucceeds() {
+        val store = AdbCredentialStore(null)
+        val ekm = ByteArray(64) { 7 }
+        val firstReadEnteredLatch = CountDownLatch(1)
+        val firstSocketClosedLatch = CountDownLatch(1)
+        val firstReaderExitedLatch = CountDownLatch(1)
+        val attemptCounter = AtomicInteger(0)
+
+        val transport = NativeWirelessAdbPairing(store) { _, _, _ ->
+            val attempt = attemptCounter.incrementAndGet()
+            if (attempt == 1) {
+                val closed = AtomicBoolean(false)
+                val lock = Object()
+                object : TlsPairingChannel {
+                    override val input = object : InputStream() {
+                        override fun read(): Int {
+                            firstReadEnteredLatch.countDown()
+                            synchronized(lock) {
+                                while (!closed.get()) {
+                                    lock.wait(5000L)
+                                }
+                            }
+                            firstReaderExitedLatch.countDown()
+                            throw IOException("First pairing socket closed on cancel")
+                        }
+                    }
+                    override val output = ByteArrayOutputStream()
+                    override val exportedKeyingMaterial = ekm
+                    override fun close() {
+                        closed.set(true)
+                        synchronized(lock) { lock.notifyAll() }
+                        firstSocketClosedLatch.countDown()
+                    }
+                }
+            } else {
+                // Subsequent attempt performs real SPAKE2 + AES-GCM exchange
+                val code = "654321"
+                val pw = code.toByteArray(Charsets.UTF_8) + ekm
+                val serverSpake = Ed25519Spake2.Spake2Session(
+                    role = Ed25519Spake2.Role.BOB_SERVER,
+                    myName = NativeWirelessAdbPairing.SERVER_NAME,
+                    theirName = NativeWirelessAdbPairing.CLIENT_NAME
+                )
+                val serverSpakeMsg = serverSpake.generateMessage(pw)
+                val serverResponseStream = java.io.PipedOutputStream()
+                val clientInput = java.io.PipedInputStream(serverResponseStream, 65536)
+                val clientOutput = object : OutputStream() {
+                    private val buf = ByteArrayOutputStream()
+                    private var stage = 0
+                    private var aesKey: javax.crypto.spec.SecretKeySpec? = null
+
+                    override fun write(b: Int) = write(byteArrayOf(b.toByte()), 0, 1)
+                    override fun write(b: ByteArray, off: Int, len: Int) {
+                        buf.write(b, off, len)
+                        while (buf.size() >= 6) {
+                            val all = buf.toByteArray()
+                            val header = java.nio.ByteBuffer.wrap(all, 0, 6).order(java.nio.ByteOrder.BIG_ENDIAN)
+                            header.get()
+                            val type = header.get()
+                            val payloadLen = header.getInt()
+                            if (all.size < 6 + payloadLen) break
+                            val payload = all.copyOfRange(6, 6 + payloadLen)
+                            buf.reset()
+                            if (all.size > 6 + payloadLen) {
+                                buf.write(all, 6 + payloadLen, all.size - 6 - payloadLen)
+                            }
+                            if (stage == 0 && type == 0.toByte()) {
+                                stage = 1
+                                val shared = serverSpake.processMessage(payload)
+                                val hkdfKey = NativeWirelessAdbPairing.hkdfSha256(
+                                    shared, NativeWirelessAdbPairing.HKDF_INFO, 16
+                                )
+                                aesKey = javax.crypto.spec.SecretKeySpec(hkdfKey, "AES")
+                                serverResponseStream.write(NativeWirelessAdbPairing.encodePacket(0, serverSpakeMsg))
+                                serverResponseStream.flush()
+                            } else if (stage == 1 && type == 1.toByte()) {
+                                stage = 2
+                                val serverPeer = ByteArray(8192).also {
+                                    it[0] = 0
+                                    "MoteTV-Subsequent-Ok".toByteArray().copyInto(it, 1)
+                                }
+                                val cipher = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding")
+                                val nonce = java.nio.ByteBuffer.allocate(12).order(java.nio.ByteOrder.LITTLE_ENDIAN).putLong(0L).array()
+                                cipher.init(javax.crypto.Cipher.ENCRYPT_MODE, aesKey, javax.crypto.spec.GCMParameterSpec(128, nonce))
+                                serverResponseStream.write(
+                                    NativeWirelessAdbPairing.encodePacket(1, cipher.doFinal(serverPeer))
+                                )
+                                serverResponseStream.flush()
+                            }
+                        }
+                    }
+                }
+                object : TlsPairingChannel {
+                    override val input = clientInput
+                    override val output = clientOutput
+                    override val exportedKeyingMaterial = ekm
+                    override fun close() {
+                        runCatching { serverResponseStream.close() }
+                        runCatching { clientInput.close() }
+                    }
+                }
+            }
+        }
+
+        val testScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.IO)
+        val manager = AdbConnectionManagerImpl(
+            context = null,
+            credentialStore = store,
+            ioDispatcher = Dispatchers.IO,
+            scope = testScope,
+            wirelessPairingTransport = transport
+        )
+
+        try {
+            val firstJob = testScope.launch {
+                manager.pairWirelessDebugging("192.168.1.90", 37111, "654321")
+            }
+            assertTrue(firstReadEnteredLatch.await(3, TimeUnit.SECONDS))
+            val originalPairingJob = manager.activePairingJobForTest()
+            assertTrue("First pairing job must be registered while active", originalPairingJob != null && originalPairingJob.isActive)
+
+            // Rejected second attempt MUST NOT overwrite or clear Attempt 1's pairingJob!
+            val secondResult = kotlinx.coroutines.runBlocking {
+                manager.pairWirelessDebugging("192.168.1.90", 38999, "111222")
+            }
+            assertTrue(secondResult.isFailure)
+            assertTrue(
+                "Rejected second attempt must leave Attempt 1's pairingJob intact",
+                manager.activePairingJobForTest() === originalPairingJob
+            )
+            assertEquals(1, attemptCounter.get())
+            assertTrue("First job must still be running before explicit cancel", firstJob.isActive)
+
+            // Cancelling now must close Attempt 1's native socket and terminate the first coroutine
+            manager.cancelWirelessPairing()
+            assertTrue(firstSocketClosedLatch.await(3, TimeUnit.SECONDS))
+            assertTrue(firstReaderExitedLatch.await(3, TimeUnit.SECONDS))
+            kotlinx.coroutines.runBlocking { withTimeoutOrNull(3000L) { firstJob.join() } }
+            assertTrue("First pairing coroutine must terminate on cancellation", firstJob.isCompleted)
+            assertTrue("First pairing coroutine must be cancelled", firstJob.isCancelled)
+            assertEquals("No stale pairing job may remain after cancellation", null, manager.activePairingJobForTest())
+
+            // A subsequent pairing attempt MUST now succeed normally!
+            val thirdResult = kotlinx.coroutines.runBlocking {
+                manager.pairWirelessDebugging("192.168.1.90", 37111, "654321")
+            }
+            assertTrue("Subsequent pairing attempt must succeed: ${thirdResult.exceptionOrNull()}", thirdResult.isSuccess)
+            assertTrue(manager.pairingState.value is AdbPairingState.Paired)
+            assertEquals("No stale pairing job may remain after success", null, manager.activePairingJobForTest())
+        } finally {
+            testScope.coroutineContext[kotlinx.coroutines.Job]?.cancel()
+        }
+    }
+
+    @Test
+    fun noStalePairingJobRemainsAfterSuccessFailureTimeoutOrCancellation() = runTest {
+        val store = AdbCredentialStore(null)
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val scope = TestScope(dispatcher)
+        var mode = "success"
+
+        val manager = AdbConnectionManagerImpl(
+            context = null,
+            credentialStore = store,
+            ioDispatcher = dispatcher,
+            scope = scope,
+            pairingTimeoutMs = 100L,
+            wirelessPairingTransport = AdbPairingTransport { host, _, _, _ ->
+                when (mode) {
+                    "success" -> Result.success("Paired with $host")
+                    "failure" -> Result.failure(AdbPairingException(AdbDiagnosticCategory.PAIRING_FAILURE, "Wrong pairing code"))
+                    "timeout" -> {
+                        delay(500L)
+                        Result.success("Timed out")
+                    }
+                    else -> {
+                        delay(5_000L)
+                        Result.success("Cancelled")
+                    }
+                }
+            }
+        )
+
+        // 1. Success -> no stale job
+        mode = "success"
+        assertTrue(manager.pairWirelessDebugging("192.168.1.55", 37111, "654321").isSuccess)
+        assertEquals(null, manager.activePairingJobForTest())
+
+        // 2. Validation failure + Transport failure -> no stale job
+        assertTrue(manager.pairWirelessDebugging("192.168.1.55", 37111, "123").isFailure)
+        assertEquals(null, manager.activePairingJobForTest())
+        mode = "failure"
+        assertTrue(manager.pairWirelessDebugging("192.168.1.55", 37111, "654321").isFailure)
+        assertEquals(null, manager.activePairingJobForTest())
+
+        // 3. Timeout -> no stale job
+        mode = "timeout"
+        assertTrue(manager.pairWirelessDebugging("192.168.1.55", 37111, "654321").isFailure)
+        assertEquals(AdbDiagnosticCategory.CONNECTION_TIMEOUT, manager.diagnosticCategory.value)
+        assertEquals(null, manager.activePairingJobForTest())
+
+        // 4. Cancellation -> no stale job
+        mode = "cancel"
+        val cancelJob = scope.launch {
+            manager.pairWirelessDebugging("192.168.1.55", 37111, "654321")
+        }
+        testScheduler.advanceTimeBy(20L)
+        testScheduler.runCurrent()
+        assertTrue(manager.activePairingJobForTest() != null)
+        manager.cancelWirelessPairing()
+        testScheduler.runCurrent()
+        assertTrue(cancelJob.isCancelled)
+        assertEquals(null, manager.activePairingJobForTest())
+
+        // 5. Next attempt after all four outcomes still succeeds cleanly
+        mode = "success"
+        assertTrue(manager.pairWirelessDebugging("192.168.1.55", 37111, "654321").isSuccess)
+        assertEquals(null, manager.activePairingJobForTest())
     }
 
     @Test

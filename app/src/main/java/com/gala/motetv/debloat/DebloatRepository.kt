@@ -1,13 +1,16 @@
 package com.gala.motetv.debloat
 
 import android.content.Context
+import android.content.SharedPreferences
 import com.gala.motetv.adb.TvDeviceInfo
 import org.json.JSONArray
 import org.json.JSONObject
 
 class DebloatRepository(
     private val context: Context?,
-    private val simulateBackupFailureForTest: Boolean = false
+    private val simulateBackupFailureForTest: Boolean = false,
+    private val simulateModifiedPersistenceFailureForTest: Boolean = false,
+    private val prefsOverride: SharedPreferences? = null
 ) {
 
     companion object {
@@ -18,12 +21,10 @@ class DebloatRepository(
         private const val MAX_HISTORY_ENTRIES = 100
     }
 
-    private val prefs by lazy {
-        context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    private val prefs: SharedPreferences? by lazy {
+        prefsOverride ?: context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     }
 
-    private var memoryBackupJson: String? = null
-    private val memoryModified = linkedSetOf<String>()
     private val memoryHistory = mutableListOf<DebloatOperationEntry>()
 
     @Synchronized
@@ -31,11 +32,27 @@ class DebloatRepository(
         if (simulateBackupFailureForTest) {
             return Result.failure(IllegalStateException("Simulated backup persistence failure"))
         }
+        val p = prefs
+            ?: return Result.failure(IllegalStateException("Persistent storage unavailable (SharedPreferences is null)"))
         return try {
             val json = serializeBackup(record).toString(2)
-            memoryBackupJson = json
-            prefs?.edit()?.putString(KEY_LATEST_BACKUP, json)?.commit()
-            Result.success(record)
+            val committed = p.edit().putString(KEY_LATEST_BACKUP, json).commit()
+            if (!committed) {
+                return Result.failure(IllegalStateException("Failed to commit debloat backup to persistent storage"))
+            }
+            val persistedJson = p.getString(KEY_LATEST_BACKUP, null)
+            if (persistedJson.isNullOrBlank()) {
+                return Result.failure(IllegalStateException("Backup commit returned true but backup was missing on read-back"))
+            }
+            val readBack = runCatching { deserializeBackup(JSONObject(persistedJson)) }.getOrNull()
+                ?: return Result.failure(IllegalStateException("Backup read-back deserialization failed"))
+            if (readBack.backupId != record.backupId ||
+                readBack.allInstalledPackages.size != record.allInstalledPackages.size ||
+                readBack.intendedDisablePackages != record.intendedDisablePackages
+            ) {
+                return Result.failure(IllegalStateException("Backup read-back mismatch after commit"))
+            }
+            Result.success(readBack)
         } catch (e: Exception) {
             Result.failure(e)
         }
@@ -43,7 +60,7 @@ class DebloatRepository(
 
     @Synchronized
     fun getLatestBackup(): DebloatBackupRecord? {
-        val jsonStr = prefs?.getString(KEY_LATEST_BACKUP, null) ?: memoryBackupJson ?: return null
+        val jsonStr = prefs?.getString(KEY_LATEST_BACKUP, null) ?: return null
         return runCatching { deserializeBackup(JSONObject(jsonStr)) }.getOrNull()
     }
 
@@ -70,32 +87,43 @@ class DebloatRepository(
     }
 
     @Synchronized
-    fun markPackageModified(packageName: String) {
+    fun markPackageModified(packageName: String): Result<Set<String>> {
         val current = getModifiedPackages().toMutableSet()
         current.add(packageName)
-        saveModifiedSet(current)
+        return saveModifiedSet(current)
     }
 
     @Synchronized
-    fun unmarkPackageModified(packageName: String) {
+    fun unmarkPackageModified(packageName: String): Result<Set<String>> {
         val current = getModifiedPackages().toMutableSet()
         current.remove(packageName)
-        saveModifiedSet(current)
+        return saveModifiedSet(current)
     }
 
     @Synchronized
     fun getModifiedPackages(): Set<String> {
-        val p = prefs
-        if (p != null) {
-            return p.getStringSet(KEY_MODIFIED_PACKAGES, emptySet())?.toSet() ?: emptySet()
-        }
-        return memoryModified.toSet()
+        val p = prefs ?: return emptySet()
+        return p.getStringSet(KEY_MODIFIED_PACKAGES, emptySet())?.toSet() ?: emptySet()
     }
 
-    private fun saveModifiedSet(set: Set<String>) {
-        memoryModified.clear()
-        memoryModified.addAll(set)
-        prefs?.edit()?.putStringSet(KEY_MODIFIED_PACKAGES, set.toSet())?.commit()
+    @Synchronized
+    internal fun saveModifiedSet(set: Set<String>): Result<Set<String>> {
+        if (simulateModifiedPersistenceFailureForTest) {
+            return Result.failure(IllegalStateException("Simulated modified-package persistence failure"))
+        }
+        val p = prefs
+            ?: return Result.failure(IllegalStateException("Persistent storage unavailable (SharedPreferences is null)"))
+        val defensiveCopy = LinkedHashSet(set)
+        val committed = p.edit().putStringSet(KEY_MODIFIED_PACKAGES, defensiveCopy).commit()
+        if (!committed) {
+            return Result.failure(IllegalStateException("Failed to commit modified packages set to persistent storage"))
+        }
+        val readBack = p.getStringSet(KEY_MODIFIED_PACKAGES, null)?.toSet()
+            ?: return Result.failure(IllegalStateException("Modified packages commit returned true but set was missing on read-back"))
+        if (readBack != defensiveCopy) {
+            return Result.failure(IllegalStateException("Modified packages read-back mismatch after commit"))
+        }
+        return Result.success(readBack)
     }
 
     @Synchronized

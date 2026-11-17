@@ -71,6 +71,56 @@ class CleanYourTvLauncherAndThemeTest {
     }
 
     @Test
+    fun restoreOriginalHomeChecksEnablePackageResultVerifiesEnabledAndPreservesRecordUntilVerified() = runTest {
+        val context = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>()
+        context.getSharedPreferences("motetv_tvhome_recovery", android.content.Context.MODE_PRIVATE).edit().clear().commit()
+
+        val adb = FakeHomeAdbManager(sdkVersion = 28)
+        adb.installedPackages.add(CleanYourTvConstants.LAUNCHER_PACKAGE)
+        val launcherManager = CleanYourTvLauncherManager(context = context, adbManager = adb)
+
+        // Capture stock HOME & switch to CleanYourTV
+        launcherManager.refreshLauncherStatus().getOrThrow()
+        launcherManager.activateCleanYourTvAsHome().getOrThrow()
+        assertEquals(CleanYourTvConstants.LAUNCHER_PACKAGE, adb.currentHomePackage)
+
+        // Case 1: enablePackage returns failure -> aborts with exact error, does NOT call setHome, preserves original HOME record
+        adb.disabledPackages.add("com.google.android.tvlauncher")
+        adb.failEnableWith = IOException("SecurityException: package manager locked")
+        val failEnableRes = launcherManager.restoreOriginalHomeLauncher()
+        assertTrue(failEnableRes.isFailure)
+        val errMsg = failEnableRes.exceptionOrNull()?.message.orEmpty()
+        assertTrue("Exact enable error must be reported: $errMsg", errMsg.contains("package manager locked"))
+        assertEquals(1, adb.setHomeCalls.size) // only the initial activate call, zero restore HOME calls
+        assertEquals("com.google.android.tvlauncher", launcherManager.getPersistedOriginalHome().first)
+
+        // Case 2: enablePackage returns non-zero exit code -> aborts and preserves record
+        adb.failEnableWith = null
+        adb.failEnableResult = AdbCommandResult(1, "", "Permission denied enabling stock launcher")
+        val failExitRes = launcherManager.restoreOriginalHomeLauncher()
+        assertTrue(failExitRes.isFailure)
+        assertTrue(failExitRes.exceptionOrNull()?.message.orEmpty().contains("Permission denied"))
+        assertEquals(1, adb.setHomeCalls.size)
+        assertEquals("com.google.android.tvlauncher", launcherManager.getPersistedOriginalHome().first)
+
+        // Case 3: enablePackage reports exit 0, but launcher still appears in disabled packages -> aborts before HOME switch
+        adb.failEnableResult = null
+        adb.ignoreEnable = true
+        val stillDisabledRes = launcherManager.restoreOriginalHomeLauncher()
+        assertTrue(stillDisabledRes.isFailure)
+        assertTrue(stillDisabledRes.exceptionOrNull()?.message.orEmpty().contains("remains disabled"))
+        assertEquals(1, adb.setHomeCalls.size)
+        assertEquals("com.google.android.tvlauncher", launcherManager.getPersistedOriginalHome().first)
+
+        // Case 4: Real enable succeeds and final HOME verification confirms stock HOME active
+        adb.ignoreEnable = false
+        val okRes = launcherManager.restoreOriginalHomeLauncher().getOrThrow()
+        assertEquals("com.google.android.tvlauncher", okRes.currentHomePackage)
+        assertEquals(2, adb.setHomeCalls.size)
+        assertEquals("com.google.android.tvlauncher", launcherManager.getPersistedOriginalHome().first)
+    }
+
+    @Test
     fun themeCatalogMatchesRealCleanYourTvSchemaWithoutUnsupportedKeys() = runTest {
         assertTrue(CleanYourTvThemeCatalog.PRESETS.size >= 29)
 
@@ -226,6 +276,11 @@ class CleanYourTvLauncherAndThemeTest {
 
         val installedPackages = linkedSetOf("com.google.android.tvlauncher", "com.android.settings")
         val enabledPackages = linkedSetOf("com.google.android.tvlauncher")
+        val disabledPackages = linkedSetOf<String>()
+        var failEnableWith: Exception? = null
+        var failEnableResult: AdbCommandResult? = null
+        var ignoreEnable: Boolean = false
+        val setHomeCalls = mutableListOf<String>()
         var currentHomePackage = "com.google.android.tvlauncher"
         var currentHomeActivity = "com.google.android.tvlauncher/.MainActivity"
         val pushedFiles = linkedMapOf<String, ByteArray>()
@@ -255,16 +310,27 @@ class CleanYourTvLauncherAndThemeTest {
         )
 
         override suspend fun listAllPackages() = Result.success(installedPackages.toList())
-        override suspend fun listDisabledPackages() = Result.success(emptySet<String>())
-        override suspend fun disablePackageForUser(packageName: String) = Result.success(AdbCommandResult(0, "disabled"))
+        override suspend fun listDisabledPackages() = Result.success(disabledPackages.toSet())
+        override suspend fun disablePackageForUser(packageName: String): Result<AdbCommandResult> {
+            disabledPackages.add(packageName)
+            enabledPackages.remove(packageName)
+            return Result.success(AdbCommandResult(0, "disabled"))
+        }
+
         override suspend fun enablePackage(packageName: String): Result<AdbCommandResult> {
-            enabledPackages.add(packageName)
+            failEnableWith?.let { return Result.failure(it) }
+            failEnableResult?.let { return Result.success(it) }
+            if (!ignoreEnable) {
+                disabledPackages.remove(packageName)
+                enabledPackages.add(packageName)
+            }
             return Result.success(AdbCommandResult(0, "enabled"))
         }
 
         override suspend fun launchHomeChooserOrOpenHome() = Result.success(AdbCommandResult(0, "Launched HOME"))
 
         override suspend fun setDefaultHomeActivity(componentName: String): Result<AdbCommandResult> {
+            setHomeCalls.add(componentName)
             if (failSetHomeActivity) {
                 return Result.failure(IOException("SecurityException: Permission denied by OEM firmware"))
             }

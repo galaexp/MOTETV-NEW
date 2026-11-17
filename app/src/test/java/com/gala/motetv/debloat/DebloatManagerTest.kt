@@ -1,5 +1,8 @@
 package com.gala.motetv.debloat
 
+import android.content.Context
+import android.content.SharedPreferences
+import androidx.test.core.app.ApplicationProvider
 import com.gala.motetv.adb.AdbCommandResult
 import com.gala.motetv.adb.AdbConnectionManager
 import com.gala.motetv.adb.AdbConnectionMode
@@ -10,21 +13,36 @@ import com.gala.motetv.adb.AdbPairingCapability
 import com.gala.motetv.adb.AdbPairingState
 import com.gala.motetv.adb.DiscoveredAdbService
 import com.gala.motetv.adb.TvDeviceInfo
+import com.gala.motetv.tvhome.CleanYourTvConstants
+import com.gala.motetv.tvhome.CleanYourTvLauncherManager
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
 import java.io.IOException
 
 @OptIn(ExperimentalCoroutinesApi::class)
 @RunWith(RobolectricTestRunner::class)
+@Config(sdk = [36])
 class DebloatManagerTest {
+
+    private lateinit var context: Context
+
+    @Before
+    fun setUp() {
+        context = ApplicationProvider.getApplicationContext()
+        context.getSharedPreferences("motetv_debloat_records", Context.MODE_PRIVATE).edit().clear().commit()
+        context.getSharedPreferences("motetv_tvhome_recovery", Context.MODE_PRIVATE).edit().clear().commit()
+    }
 
     private fun stickDevice() = TvDeviceInfo(
         manufacturer = "Xiaomi",
@@ -73,7 +91,7 @@ class DebloatManagerTest {
             allPackages = pkgs,
             initialDisabled = setOf("com.xm.webcontent")
         )
-        val repo = DebloatRepository(context = null)
+        val repo = DebloatRepository(context = context)
         val scanner = TvPackageScanner(adb, repo)
         val manager = DebloatManager(adb, scanner, repo, timeProvider = { 1_700_000_000_000L })
 
@@ -127,7 +145,7 @@ class DebloatManagerTest {
             allPackages = pkgs,
             failEnableOnPackages = setOf("com.miui.tv.analytics")
         )
-        val repo = DebloatRepository(context = null)
+        val repo = DebloatRepository(context = context)
         val manager = DebloatManager(adb, TvPackageScanner(adb, repo), repo)
 
         assertTrue(manager.scanTv().isSuccess)
@@ -156,7 +174,7 @@ class DebloatManagerTest {
             allPackages = pkgs,
             ignoreDisableOnPackages = setOf("com.xiaomi.statistic")
         )
-        val repo = DebloatRepository(context = null)
+        val repo = DebloatRepository(context = context)
         val manager = DebloatManager(adb, TvPackageScanner(adb, repo), repo)
 
         assertTrue(manager.scanTv().isSuccess)
@@ -166,6 +184,249 @@ class DebloatManagerTest {
             "Batch 2 package must not be attempted after batch 1 verification failure",
             adb.disableCalls.contains("com.mitv.tvhome.michannel")
         )
+    }
+
+    @Test
+    fun failedInitialBackupCreationCommitReturnsFailureWithoutInMemoryFallbackOrDisabling() = runTest {
+        val realPrefs = context.getSharedPreferences("motetv_debloat_records", Context.MODE_PRIVATE)
+        val failingPrefs = FailingCommitSharedPreferences(realPrefs).apply {
+            failBackupCommit = true
+        }
+        val adb = FakeDebloatAdbManager(
+            deviceInfo = stickDevice(),
+            allPackages = listOf("com.miui.tv.analytics", "com.xiaomi.statistic", "com.google.android.tvlauncher")
+        )
+        val repo = DebloatRepository(context = context, prefsOverride = failingPrefs)
+        val manager = DebloatManager(adb, TvPackageScanner(adb, repo), repo, timeProvider = { 1_700_000_001_000L })
+
+        val sampleBackup = DebloatBackupRecord(
+            backupId = "init-fail-1",
+            createdAtMs = 1_700_000_001_000L,
+            deviceInfo = stickDevice(),
+            allInstalledPackages = listOf("com.miui.tv.analytics", "com.google.android.tvlauncher"),
+            originallyDisabledPackages = emptyList(),
+            originalHomePackage = "com.google.android.tvlauncher",
+            originalHomeActivity = "com.google.android.tvlauncher/.MainActivity",
+            intendedDisablePackages = listOf("com.miui.tv.analytics"),
+            modifiedByMoteTvPackages = emptyList()
+        )
+        val directSave = repo.saveBackup(sampleBackup)
+        assertTrue("saveBackup must fail when commit() returns false", directSave.isFailure)
+        assertNull("getLatestBackup must NEVER rely on in-memory data when commit fails", repo.getLatestBackup())
+
+        assertTrue(manager.scanTv().isSuccess)
+        val res = manager.disablePackagesWithBackup(listOf("com.miui.tv.analytics"))
+        assertTrue("disablePackagesWithBackup must abort if backup cannot be durably persisted", res.isFailure)
+        assertTrue("No package may be disabled if initial backup commit fails", adb.disableCalls.isEmpty())
+        assertNull(manager.latestBackup.value)
+        assertNull(repo.getLatestBackup())
+    }
+
+    @Test
+    fun failedModifiedPackageTrackingCommitReturnsFailureAndStopsDebloat() = runTest {
+        val realPrefs = context.getSharedPreferences("motetv_debloat_records", Context.MODE_PRIVATE)
+        val failingPrefs = FailingCommitSharedPreferences(realPrefs).apply {
+            failModifiedCommit = true
+        }
+        val adb = FakeDebloatAdbManager(
+            deviceInfo = stickDevice(),
+            allPackages = listOf(
+                "com.miui.tv.analytics",
+                "com.xiaomi.statistic",
+                "com.mitv.tvhome.atv",
+                "com.mitv.tvhome.michannel",
+                "com.google.android.tvlauncher"
+            )
+        )
+        val repo = DebloatRepository(context = context, prefsOverride = failingPrefs)
+        val manager = DebloatManager(adb, TvPackageScanner(adb, repo), repo, timeProvider = { 1_700_000_002_000L })
+
+        // Direct saveModifiedSet & markPackageModified must NOT silently report success on commit() == false
+        val directSetRes = repo.saveModifiedSet(setOf("com.miui.tv.analytics"))
+        assertTrue("saveModifiedSet must return failure when commit() returns false", directSetRes.isFailure)
+        assertTrue(repo.markPackageModified("com.miui.tv.analytics").isFailure)
+        assertTrue("Modified set must remain empty when commit fails", repo.getModifiedPackages().isEmpty())
+
+        assertTrue(manager.scanTv().isSuccess)
+        val batchRes = manager.disablePackagesWithBackup(
+            listOf("com.miui.tv.analytics", "com.xiaomi.statistic", "com.mitv.tvhome.atv", "com.mitv.tvhome.michannel")
+        )
+        assertTrue("disablePackagesWithBackup must fail when modified-package persistence fails", batchRes.isFailure)
+        assertFalse(
+            "Batch 2 must NOT run after modified-package persistence failure in Batch 1",
+            adb.disableCalls.contains("com.mitv.tvhome.michannel")
+        )
+        assertTrue(manager.modifiedPackages.value.isEmpty())
+    }
+
+    @Test
+    fun failedBackupUpdatePreservesExistingDurableBackupWithoutInMemoryOverride() = runTest {
+        val realPrefs = context.getSharedPreferences("motetv_debloat_records", Context.MODE_PRIVATE)
+        val failingPrefs = FailingCommitSharedPreferences(realPrefs)
+        val adb = FakeDebloatAdbManager(
+            deviceInfo = stickDevice(),
+            allPackages = listOf("com.miui.tv.analytics", "com.xiaomi.statistic", "com.google.android.tvlauncher")
+        )
+        val repo = DebloatRepository(context = context, prefsOverride = failingPrefs)
+        var clock = 1_700_000_003_000L
+        val manager = DebloatManager(adb, TvPackageScanner(adb, repo), repo, timeProvider = { clock })
+
+        // Step 1: Initial backup & first package disable succeeds durably
+        assertTrue(manager.scanTv().isSuccess)
+        manager.disablePackagesWithBackup(listOf("com.miui.tv.analytics")).getOrThrow()
+        val initialBackup = repo.getLatestBackup()!!
+        assertEquals(listOf("com.miui.tv.analytics"), initialBackup.intendedDisablePackages)
+
+        // Step 2: Simulate persistence failure on subsequent backup update
+        failingPrefs.failBackupCommit = true
+        clock += 5_000L
+
+        val directUpdate = repo.saveBackup(
+            initialBackup.copy(
+                backupId = "failed-update-2",
+                createdAtMs = clock,
+                intendedDisablePackages = listOf("com.xiaomi.statistic"),
+                modifiedByMoteTvPackages = listOf("com.miui.tv.analytics")
+            )
+        )
+        assertTrue("Backup update must fail when commit() returns false", directUpdate.isFailure)
+        assertEquals(
+            "Existing durable backup must remain intact and NOT replaced by uncommitted in-memory data",
+            initialBackup.backupId,
+            repo.getLatestBackup()?.backupId
+        )
+
+        val secondRun = manager.disablePackagesWithBackup(listOf("com.xiaomi.statistic"))
+        assertTrue("Debloat must refuse to proceed when backup update fails to persist", secondRun.isFailure)
+        assertFalse("com.xiaomi.statistic must NOT be disabled when backup update failed", adb.disableCalls.contains("com.xiaomi.statistic"))
+        assertEquals(initialBackup.backupId, manager.latestBackup.value?.backupId)
+    }
+
+    @Test
+    fun recoveryAfterRestartWithFailedPersistenceUpdateUsesDurableRecordsAndReportsUnmarkFailure() = runTest {
+        val realPrefs = context.getSharedPreferences("motetv_debloat_records", Context.MODE_PRIVATE)
+        val controllablePrefs = FailingCommitSharedPreferences(realPrefs)
+        val adb = FakeDebloatAdbManager(
+            deviceInfo = stickDevice(),
+            allPackages = listOf("com.miui.tv.analytics", "com.xiaomi.statistic", "com.google.android.tvlauncher")
+        )
+
+        // Session 1: Persist initial backup + modified package + original HOME cleanly
+        val backupB1Id: String
+        run {
+            val repo1 = DebloatRepository(context = context, prefsOverride = controllablePrefs)
+            val launcher1 = CleanYourTvLauncherManager(context, adb)
+            launcher1.refreshLauncherStatus().getOrThrow()
+            val mgr1 = DebloatManager(adb, TvPackageScanner(adb, repo1), repo1, timeProvider = { 1_700_000_004_000L })
+            mgr1.scanTv().getOrThrow()
+            mgr1.disablePackagesWithBackup(listOf("com.miui.tv.analytics")).getOrThrow()
+            backupB1Id = repo1.getLatestBackup()!!.backupId
+
+            // Subsequent update attempt fails persistence -> must not pollute durable state
+            controllablePrefs.failBackupCommit = true
+            assertTrue(mgr1.disablePackagesWithBackup(listOf("com.xiaomi.statistic")).isFailure)
+        }
+
+        // Session 2: Simulate app restart (new objects); persistence works except simulate modified-set unmark failure first
+        controllablePrefs.failBackupCommit = false
+        controllablePrefs.failModifiedCommit = true
+        val repo2 = DebloatRepository(context = context, prefsOverride = controllablePrefs)
+        val mgr2 = DebloatManager(adb, TvPackageScanner(adb, repo2), repo2)
+        val launcher2 = CleanYourTvLauncherManager(context, adb)
+        val coordinator2 = TvRecoveryCoordinator(mgr2, launcher2)
+
+        assertEquals(backupB1Id, repo2.getLatestBackup()?.backupId)
+        assertEquals(setOf("com.miui.tv.analytics"), mgr2.modifiedPackages.value)
+
+        // If unmarkPackageModified commit() fails during restore, recovery MUST fail honestly rather than silently clearing state
+        val failedPersistRecovery = coordinator2.recoverTv()
+        assertTrue("Recovery must report failure when unmark commit() fails", failedPersistRecovery.isFailure)
+        assertEquals(setOf("com.miui.tv.analytics"), repo2.getModifiedPackages())
+
+        // Once persistence recovers, retry succeeds cleanly using durable records
+        controllablePrefs.failModifiedCommit = false
+        val recovered = coordinator2.recoverTv().getOrThrow()
+        assertTrue(recovered.isCompleteSuccess)
+        assertTrue(repo2.getModifiedPackages().isEmpty())
+    }
+
+    private class FailingCommitSharedPreferences(
+        private val delegate: SharedPreferences
+    ) : SharedPreferences {
+        var failBackupCommit: Boolean = false
+        var failModifiedCommit: Boolean = false
+
+        override fun getAll(): MutableMap<String, *> = delegate.all
+        override fun getString(key: String?, defValue: String?): String? = delegate.getString(key, defValue)
+        override fun getStringSet(key: String?, defValues: MutableSet<String>?): MutableSet<String>? =
+            delegate.getStringSet(key, defValues)
+        override fun getInt(key: String?, defValue: Int): Int = delegate.getInt(key, defValue)
+        override fun getLong(key: String?, defValue: Long): Long = delegate.getLong(key, defValue)
+        override fun getFloat(key: String?, defValue: Float): Float = delegate.getFloat(key, defValue)
+        override fun getBoolean(key: String?, defValue: Boolean): Boolean = delegate.getBoolean(key, defValue)
+        override fun contains(key: String?): Boolean = delegate.contains(key)
+        override fun registerOnSharedPreferenceChangeListener(listener: SharedPreferences.OnSharedPreferenceChangeListener?) =
+            delegate.registerOnSharedPreferenceChangeListener(listener)
+        override fun unregisterOnSharedPreferenceChangeListener(listener: SharedPreferences.OnSharedPreferenceChangeListener?) =
+            delegate.unregisterOnSharedPreferenceChangeListener(listener)
+
+        override fun edit(): SharedPreferences.Editor {
+            val delegateEditor = delegate.edit()
+            val pendingKeys = mutableSetOf<String>()
+            return object : SharedPreferences.Editor {
+                override fun putString(key: String?, value: String?): SharedPreferences.Editor {
+                    key?.let(pendingKeys::add)
+                    delegateEditor.putString(key, value)
+                    return this
+                }
+                override fun putStringSet(key: String?, values: MutableSet<String>?): SharedPreferences.Editor {
+                    key?.let(pendingKeys::add)
+                    delegateEditor.putStringSet(key, values)
+                    return this
+                }
+                override fun putInt(key: String?, value: Int): SharedPreferences.Editor {
+                    key?.let(pendingKeys::add)
+                    delegateEditor.putInt(key, value)
+                    return this
+                }
+                override fun putLong(key: String?, value: Long): SharedPreferences.Editor {
+                    key?.let(pendingKeys::add)
+                    delegateEditor.putLong(key, value)
+                    return this
+                }
+                override fun putFloat(key: String?, value: Float): SharedPreferences.Editor {
+                    key?.let(pendingKeys::add)
+                    delegateEditor.putFloat(key, value)
+                    return this
+                }
+                override fun putBoolean(key: String?, value: Boolean): SharedPreferences.Editor {
+                    key?.let(pendingKeys::add)
+                    delegateEditor.putBoolean(key, value)
+                    return this
+                }
+                override fun remove(key: String?): SharedPreferences.Editor {
+                    key?.let(pendingKeys::add)
+                    delegateEditor.remove(key)
+                    return this
+                }
+                override fun clear(): SharedPreferences.Editor {
+                    delegateEditor.clear()
+                    return this
+                }
+                override fun commit(): Boolean {
+                    if (failBackupCommit && pendingKeys.contains("latest_backup_json")) {
+                        return false
+                    }
+                    if (failModifiedCommit && pendingKeys.contains("modified_by_motetv_set")) {
+                        return false
+                    }
+                    return delegateEditor.commit()
+                }
+                override fun apply() {
+                    commit()
+                }
+            }
+        }
     }
 
     private class FakeDebloatAdbManager(
