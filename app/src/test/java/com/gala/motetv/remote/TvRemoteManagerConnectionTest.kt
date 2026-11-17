@@ -81,7 +81,8 @@ class TvRemoteManagerConnectionTest {
         var autoRespondHandshake: Boolean = true,
         var failOnConnect: Boolean = false,
         var failOnWrite: Boolean = false,
-        var failOnNthWrite: Int = -1 // 1-indexed write count to fail on
+        var failOnNthWrite: Int = -1, // 1-indexed write count to fail mid-frame
+        var failBeforeFirstByte: Boolean = false
     ) : TvTransport {
         val isOpen = AtomicBoolean(false)
         val sentFrames = CopyOnWriteArrayList<ByteArray>()
@@ -137,6 +138,13 @@ class TvRemoteManagerConnectionTest {
             frameReader = ProtoFrameReader(customInStream)
 
             val interceptingOut = object : ByteArrayOutputStream() {
+                override fun write(b: Int) {
+                    if (failBeforeFirstByte && writeAttemptCount.get() >= 2) {
+                        throw IOException("Simulated pre-write failure before any byte sent")
+                    }
+                    super.write(b)
+                }
+
                 override fun write(b: ByteArray, off: Int, len: Int) {
                     val count = writeAttemptCount.incrementAndGet()
                     if (failOnWrite || (failOnNthWrite > 0 && count == failOnNthWrite)) {
@@ -916,12 +924,13 @@ class TvRemoteManagerConnectionTest {
         )
 
         try {
-            // Establish READY session
+            // Start clock at non-zero offset for distinct timestamps
+            advanceTimeBy(1000L)
             manager.connect(testDevice)
             testScheduler.runCurrent()
             assertTrue(manager.connectionState.value is ConnectionState.Ready)
 
-            // Clear handshake frames from recorded messages for clean ping checks
+            val initialInboundTs = manager.connectionDiagnostics.value.lastReceivedResponseTimeMs
             transport!!.sentMessages.clear()
 
             // Send repeated outgoing button presses every 2 seconds for 12 seconds with NO incoming TV frames
@@ -931,23 +940,420 @@ class TvRemoteManagerConnectionTest {
                 testScheduler.runCurrent()
             }
 
+            // Inbound timestamp must remain unchanged while outbound timestamp advanced
+            assertEquals(
+                "Outgoing buttons must never update lastReceivedResponseTimeMs",
+                initialInboundTs,
+                manager.connectionDiagnostics.value.lastReceivedResponseTimeMs
+            )
+            assertTrue(
+                "Outgoing buttons must advance lastOutboundFrameTimeMs",
+                manager.connectionDiagnostics.value.lastOutboundFrameTimeMs > initialInboundTs
+            )
+
             // Verify a RemotePingRequest was transmitted despite continuous button presses
             val pingMsg = transport!!.sentMessages.firstOrNull { it.remote_ping_request != null }
             assertNotNull("Heartbeat ping must be sent after PING_INTERVAL_MS despite active outbound button presses", pingMsg)
             assertTrue("Ping must be marked outstanding", manager.connectionDiagnostics.value.isPingOutstanding)
 
-            // Advance time past ping deadline (7000ms) without sending any incoming TV response
+            // Advance time past ping deadline without sending any incoming TV response
             advanceTimeBy(8000L)
             testScheduler.runCurrent()
 
-            // Verify that failure to receive matching pong triggers reconnection
+            assertFalse("Dead transport must be closed after ping deadline", transport!!.isOpen.get())
             assertTrue(
                 "Missing pong response must trigger reconnection",
-                manager.connectionDiagnostics.value.lastDisconnectReason.contains("Ping response deadline exceeded") ||
-                        manager.connectionState.value is ConnectionState.Reconnecting ||
-                        manager.connectionState.value is ConnectionState.Connecting ||
-                        manager.connectionDiagnostics.value.reconnectAttemptCount > 0
+                manager.connectionDiagnostics.value.recentReconnectReasons.any { it.contains("Ping response deadline exceeded") }
             )
+        } finally {
+            managerScope.cancel()
+        }
+    }
+
+    // =========================================================================
+    // Scenario 20: Missing pong closes dead transport and succeeds on reconnect
+    // =========================================================================
+    @Test
+    fun test20_missingPongClosesTransportAndSucceedsOnReconnect() = runTest {
+        val testDispatcher = StandardTestDispatcher(testScheduler)
+        val managerScope = kotlinx.coroutines.CoroutineScope(testDispatcher + kotlinx.coroutines.Job())
+        val transports = mutableListOf<FakeTvTransport>()
+
+        val manager = TvRemoteManagerImpl(
+            credentialStore = credentialStore,
+            ioDispatcher = testDispatcher,
+            scope = managerScope,
+            transportFactory = { host, port, _ ->
+                FakeTvTransport(host, port).also { transports.add(it) }
+            },
+            timeProvider = { testScheduler.currentTime }
+        )
+
+        try {
+            advanceTimeBy(100L)
+            manager.connect(testDevice)
+            testScheduler.runCurrent()
+            assertEquals(1, transports.size)
+            val firstSessionId = manager.connectionDiagnostics.value.sessionId
+            assertTrue(manager.connectionState.value is ConnectionState.Ready)
+
+            // Trigger ping at 12s and miss deadline at 18s+
+            advanceTimeBy(14000L)
+            testScheduler.runCurrent()
+            assertTrue(manager.connectionDiagnostics.value.isPingOutstanding)
+
+            advanceTimeBy(7000L)
+            testScheduler.runCurrent()
+
+            assertFalse("First dead transport must be closed", transports[0].isOpen.get())
+            assertEquals("Expected exactly one replacement transport on coordinated reconnect", 2, transports.size)
+            assertTrue("Second transport must be open and READY", transports[1].isOpen.get())
+            assertTrue("Connection state must recover to Ready", manager.connectionState.value is ConnectionState.Ready)
+            assertTrue(manager.connectionDiagnostics.value.sessionId > firstSessionId)
+            assertFalse(manager.connectionDiagnostics.value.isPingOutstanding)
+        } finally {
+            managerScope.cancel()
+        }
+    }
+
+    // =========================================================================
+    // Scenario 21: Wi-Fi loss invalidates session and restoration reconnects
+    // =========================================================================
+    @Test
+    fun test21_wifiLossAndRestorationReconnects() = runTest {
+        val testDispatcher = StandardTestDispatcher(testScheduler)
+        val managerScope = kotlinx.coroutines.CoroutineScope(testDispatcher + kotlinx.coroutines.Job())
+        val transports = mutableListOf<FakeTvTransport>()
+
+        val manager = TvRemoteManagerImpl(
+            credentialStore = credentialStore,
+            ioDispatcher = testDispatcher,
+            scope = managerScope,
+            transportFactory = { host, port, _ ->
+                FakeTvTransport(host, port).also { transports.add(it) }
+            },
+            timeProvider = { testScheduler.currentTime }
+        )
+
+        try {
+            advanceTimeBy(100L)
+            manager.connect(testDevice)
+            testScheduler.runCurrent()
+            assertTrue(manager.connectionState.value is ConnectionState.Ready)
+            val session1 = manager.connectionDiagnostics.value.sessionId
+
+            // Simulate Wi-Fi loss
+            manager.onNetworkLost()
+            testScheduler.runCurrent()
+
+            assertFalse("Transport must close on network loss", transports[0].isOpen.get())
+            assertTrue(manager.connectionState.value is ConnectionState.Reconnecting)
+            assertEquals("Network lost", manager.connectionDiagnostics.value.lastDisconnectReason)
+
+            // Simulate Wi-Fi restoration
+            advanceTimeBy(500L)
+            manager.onNetworkRestored()
+            testScheduler.runCurrent()
+
+            assertEquals(2, transports.size)
+            assertTrue(transports[1].isOpen.get())
+            assertTrue("Must transition back to Ready on network restoration", manager.connectionState.value is ConnectionState.Ready)
+            assertTrue(manager.connectionDiagnostics.value.sessionId > session1)
+        } finally {
+            managerScope.cancel()
+        }
+    }
+
+    // =========================================================================
+    // Scenario 22: App background/resume skips healthy and reconnects stale session
+    // =========================================================================
+    @Test
+    fun test22_appResumeSkipsHealthyAndReconnectsStale() = runTest {
+        val testDispatcher = StandardTestDispatcher(testScheduler)
+        val managerScope = kotlinx.coroutines.CoroutineScope(testDispatcher + kotlinx.coroutines.Job())
+        val transports = mutableListOf<FakeTvTransport>()
+        var fakeClock = 1_000L
+
+        val manager = TvRemoteManagerImpl(
+            credentialStore = credentialStore,
+            ioDispatcher = testDispatcher,
+            scope = managerScope,
+            transportFactory = { host, port, _ ->
+                FakeTvTransport(host, port).also { transports.add(it) }
+            },
+            timeProvider = { fakeClock }
+        )
+
+        try {
+            manager.connect(testDevice)
+            testScheduler.runCurrent()
+            assertTrue(manager.connectionState.value is ConnectionState.Ready)
+            val session1 = manager.connectionDiagnostics.value.sessionId
+
+            // Case A: Resume shortly afterward while healthy -> should NOT reconnect
+            fakeClock += 3_000L
+            manager.onAppResume()
+            testScheduler.runCurrent()
+            assertEquals("Healthy resume must reuse existing session", 1, transports.size)
+            assertEquals(session1, manager.connectionDiagnostics.value.sessionId)
+
+            // Case B: Phone slept for 60s without advancing coroutine timers; session is now stale
+            fakeClock += 60_000L
+            manager.onAppResume()
+            testScheduler.runCurrent()
+
+            assertEquals("Stale resume must tear down old session and open new transport", 2, transports.size)
+            assertFalse("Stale transport must be closed", transports[0].isOpen.get())
+            assertTrue("New transport must be Ready", manager.connectionState.value is ConnectionState.Ready)
+            assertTrue(manager.connectionDiagnostics.value.sessionId > session1)
+        } finally {
+            managerScope.cancel()
+        }
+    }
+
+    // =========================================================================
+    // Scenario 23: Repeated reconnect triggers coalesce without duplicate connects
+    // =========================================================================
+    @Test
+    fun test23_repeatedReconnectTriggersCoalesce() = runTest {
+        val testDispatcher = StandardTestDispatcher(testScheduler)
+        val managerScope = kotlinx.coroutines.CoroutineScope(testDispatcher + kotlinx.coroutines.Job())
+        val connectCalls = AtomicInteger(0)
+
+        val manager = TvRemoteManagerImpl(
+            credentialStore = credentialStore,
+            ioDispatcher = testDispatcher,
+            scope = managerScope,
+            transportFactory = { host, port, _ ->
+                connectCalls.incrementAndGet()
+                // Initial connect fails so manager enters backoff Reconnecting state
+                FakeTvTransport(host, port, failOnConnect = connectCalls.get() == 1)
+            },
+            timeProvider = { testScheduler.currentTime }
+        )
+
+        try {
+            manager.connect(testDevice)
+            testScheduler.runCurrent()
+            assertEquals(1, connectCalls.get())
+            assertTrue(manager.connectionState.value is ConnectionState.Reconnecting)
+
+            // Fire repeated reconnect triggers while backoff reconnect job is pending
+            manager.reconnectIfDisconnected()
+            manager.onNetworkRestored()
+            manager.onAppResume()
+            testScheduler.runCurrent()
+
+            // First trigger upgrades to immediate and others coalesce cleanly
+            assertEquals("Coalesced reconnects must produce only one new transport attempt", 2, connectCalls.get())
+            assertTrue("Expected coalescedReconnectCount >= 2", manager.connectionDiagnostics.value.coalescedReconnectCount >= 2)
+            assertTrue(manager.connectionState.value is ConnectionState.Ready)
+        } finally {
+            managerScope.cancel()
+        }
+    }
+
+    // =========================================================================
+    // Scenario 24: Command queue preserves strict FIFO order and deterministic expiration
+    // =========================================================================
+    @Test
+    fun test24_commandQueueOrderingAndDeterministicExpiration() = runTest {
+        var clock = 10_000L
+        val queue = RemoteCommandQueue(maxCapacity = 25, timeProvider = { clock })
+
+        val cmd1 = QueuedRemoteCommand.KeyCommand(AndroidTvKeyCodes.KEYCODE_DPAD_UP, Direction.SHORT, createdAtMs = clock)
+        clock += 2_000L
+        val cmd2 = QueuedRemoteCommand.KeyCommand(AndroidTvKeyCodes.KEYCODE_DPAD_DOWN, Direction.SHORT, createdAtMs = clock)
+        val cmd3 = QueuedRemoteCommand.ImeCommand("hello", createdAtMs = clock)
+        val cmd4 = QueuedRemoteCommand.AppLinkCommand("https://youtube.com", createdAtMs = clock)
+
+        queue.enqueue(cmd1)
+        queue.enqueue(cmd2)
+        queue.enqueue(cmd3)
+        queue.enqueue(cmd4)
+
+        // Advance clock by 2000ms -> cmd1 age is 4000ms (> 3500ms expired), cmd2/3/4 age is 2000ms (still valid!)
+        clock += 2_000L
+        val ordered = mutableListOf<QueuedRemoteCommand>()
+        while (true) {
+            val next = queue.peekNextValid() ?: break
+            ordered.add(next)
+            queue.removeHead(next)
+        }
+
+        assertEquals(3, ordered.size)
+        assertTrue(ordered[0] is QueuedRemoteCommand.KeyCommand)
+        assertEquals(AndroidTvKeyCodes.KEYCODE_DPAD_DOWN, (ordered[0] as QueuedRemoteCommand.KeyCommand).keyCode)
+        assertEquals("hello", (ordered[1] as QueuedRemoteCommand.ImeCommand).text)
+        assertEquals("https://youtube.com", (ordered[2] as QueuedRemoteCommand.AppLinkCommand).appLink)
+        assertEquals(1, queue.expiredCount)
+    }
+
+    // =========================================================================
+    // Scenario 25: Mid-write failure marks uncertain delivery and does NOT blindly replay
+    // =========================================================================
+    @Test
+    fun test25_midWriteFailureFlagsUncertainDeliveryWithoutBlindReplay() = runTest {
+        val testDispatcher = StandardTestDispatcher(testScheduler)
+        val managerScope = kotlinx.coroutines.CoroutineScope(testDispatcher + kotlinx.coroutines.Job())
+        var count = 0
+        var transport2: FakeTvTransport? = null
+
+        val manager = TvRemoteManagerImpl(
+            credentialStore = credentialStore,
+            ioDispatcher = testDispatcher,
+            scope = managerScope,
+            transportFactory = { host, port, _ ->
+                count++
+                if (count == 1) {
+                    // Fail mid-frame on the 3rd write (after 2 handshake frames)
+                    FakeTvTransport(host, port, failOnNthWrite = 3)
+                } else {
+                    FakeTvTransport(host, port).also { transport2 = it }
+                }
+            },
+            timeProvider = { testScheduler.currentTime }
+        )
+
+        try {
+            advanceTimeBy(100L)
+            manager.connect(testDevice)
+            testScheduler.runCurrent()
+            assertTrue(manager.connectionState.value is ConnectionState.Ready)
+
+            // Queue two commands: DPAD_UP will fail mid-write; DPAD_DOWN is never attempted
+            manager.sendKey(AndroidTvKeyCodes.KEYCODE_DPAD_UP, Direction.SHORT)
+            manager.sendKey(AndroidTvKeyCodes.KEYCODE_DPAD_DOWN, Direction.SHORT)
+            testScheduler.runCurrent()
+
+            assertEquals(1, manager.connectionDiagnostics.value.uncertainDeliveryCount)
+            assertNotNull(manager.connectionDiagnostics.value.lastUncertainCommand)
+            assertTrue(manager.connectionState.value is ConnectionState.Ready)
+            assertNotNull(transport2)
+
+            // DPAD_UP must NOT be blindly replayed on transport2, while DPAD_DOWN MUST be delivered!
+            val upReplayed = transport2!!.sentMessages.any {
+                it.remote_key_inject?.key_code == AndroidTvKeyCodes.KEYCODE_DPAD_UP
+            }
+            val downDelivered = transport2!!.sentMessages.any {
+                it.remote_key_inject?.key_code == AndroidTvKeyCodes.KEYCODE_DPAD_DOWN
+            }
+            assertFalse("Uncertain mid-write DPAD_UP must NOT be blindly replayed", upReplayed)
+            assertTrue("Subsequent unattempted DPAD_DOWN must be delivered after reconnect", downDelivered)
+        } finally {
+            managerScope.cancel()
+        }
+    }
+
+    // =========================================================================
+    // Scenario 26: Pre-write failure preserves command cleanly and replays in order
+    // =========================================================================
+    @Test
+    fun test26_preWriteFailurePreservesCommandForRetry() = runTest {
+        val testDispatcher = StandardTestDispatcher(testScheduler)
+        val managerScope = kotlinx.coroutines.CoroutineScope(testDispatcher + kotlinx.coroutines.Job())
+        var count = 0
+        var transport2: FakeTvTransport? = null
+
+        val manager = TvRemoteManagerImpl(
+            credentialStore = credentialStore,
+            ioDispatcher = testDispatcher,
+            scope = managerScope,
+            transportFactory = { host, port, _ ->
+                count++
+                if (count == 1) {
+                    FakeTvTransport(host, port, failBeforeFirstByte = true)
+                } else {
+                    FakeTvTransport(host, port).also { transport2 = it }
+                }
+            },
+            timeProvider = { testScheduler.currentTime }
+        )
+
+        try {
+            advanceTimeBy(100L)
+            manager.connect(testDevice)
+            testScheduler.runCurrent()
+
+            manager.sendKey(AndroidTvKeyCodes.KEYCODE_DPAD_LEFT, Direction.SHORT)
+            manager.sendKey(AndroidTvKeyCodes.KEYCODE_DPAD_RIGHT, Direction.SHORT)
+            testScheduler.runCurrent()
+
+            assertEquals(0, manager.connectionDiagnostics.value.uncertainDeliveryCount)
+            assertTrue(manager.connectionState.value is ConnectionState.Ready)
+            val deliveredKeys = transport2!!.sentMessages.mapNotNull { it.remote_key_inject?.key_code }
+            assertEquals(
+                listOf(AndroidTvKeyCodes.KEYCODE_DPAD_LEFT, AndroidTvKeyCodes.KEYCODE_DPAD_RIGHT),
+                deliveredKeys
+            )
+        } finally {
+            managerScope.cancel()
+        }
+    }
+
+    // =========================================================================
+    // Scenario 27: Long-press END_LONG release is protected from eviction & uncertain drop
+    // =========================================================================
+    @Test
+    fun test27_longPressEndLongReleaseNeverLost() = runTest {
+        val queue = RemoteCommandQueue(maxCapacity = 3)
+        queue.enqueue(QueuedRemoteCommand.KeyCommand(AndroidTvKeyCodes.KEYCODE_DPAD_UP, Direction.END_LONG))
+        queue.enqueue(QueuedRemoteCommand.KeyCommand(AndroidTvKeyCodes.KEYCODE_DPAD_DOWN, Direction.SHORT))
+        queue.enqueue(QueuedRemoteCommand.KeyCommand(AndroidTvKeyCodes.KEYCODE_DPAD_LEFT, Direction.SHORT))
+        // 4th command exceeds capacity 3: should evict SHORT DPAD_DOWN rather than END_LONG DPAD_UP
+        queue.enqueue(QueuedRemoteCommand.KeyCommand(AndroidTvKeyCodes.KEYCODE_DPAD_RIGHT, Direction.SHORT))
+
+        val valid = queue.getAllValid().map { it as QueuedRemoteCommand.KeyCommand }
+        assertEquals(3, valid.size)
+        assertTrue(
+            "END_LONG release command must be preserved during eviction",
+            valid.any { it.keyCode == AndroidTvKeyCodes.KEYCODE_DPAD_UP && it.direction == Direction.END_LONG }
+        )
+        assertEquals(1, queue.evictedCount)
+    }
+
+    // =========================================================================
+    // Scenario 28: TV sleeping causes backoff failure state; waking restores READY session
+    // =========================================================================
+    @Test
+    fun test28_tvSleepingBackoffAndWakingRestoresSession() = runTest {
+        val testDispatcher = StandardTestDispatcher(testScheduler)
+        val managerScope = kotlinx.coroutines.CoroutineScope(testDispatcher + kotlinx.coroutines.Job())
+        var tvAwake = false
+
+        val manager = TvRemoteManagerImpl(
+            credentialStore = credentialStore,
+            ioDispatcher = testDispatcher,
+            scope = managerScope,
+            transportFactory = { host, port, _ ->
+                FakeTvTransport(host, port, failOnConnect = !tvAwake)
+            },
+            timeProvider = { testScheduler.currentTime }
+        )
+
+        try {
+            // TV is sleeping -> repeated backoff attempts escalate to ConnectionState.Failed
+            manager.connect(testDevice)
+            testScheduler.runCurrent()
+
+            repeat(5) {
+                advanceTimeBy(20_000L)
+                testScheduler.runCurrent()
+            }
+
+            assertTrue(
+                "Sleeping TV after >=5 retries should enter Failed state",
+                manager.connectionState.value is ConnectionState.Failed
+            )
+            assertTrue(manager.connectionDiagnostics.value.reconnectAttemptCount >= 5)
+
+            // TV wakes up and next retry or resume triggers recovery to READY
+            tvAwake = true
+            advanceTimeBy(20_000L)
+            testScheduler.runCurrent()
+
+            assertTrue("Waking TV must recover to ConnectionState.Ready", manager.connectionState.value is ConnectionState.Ready)
+            assertEquals(0, manager.connectionDiagnostics.value.reconnectAttemptCount)
         } finally {
             managerScope.cancel()
         }

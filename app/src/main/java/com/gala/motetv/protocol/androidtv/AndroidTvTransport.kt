@@ -39,7 +39,10 @@ class AndroidTvTransport(
         private set
 
     override val isConnected: Boolean
-        get() = sslSocket?.isConnected == true && sslSocket?.isClosed == false
+        get() {
+            val sock = sslSocket ?: return false
+            return sock.isConnected && !sock.isClosed && !sock.isInputShutdown && !sock.isOutputShutdown
+        }
 
     /**
      * Connects via mutual TLS to the TV and performs the TLS handshake.

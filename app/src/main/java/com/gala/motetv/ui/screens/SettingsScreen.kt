@@ -41,6 +41,9 @@ fun SettingsScreen(
     onRemoveDevice: (String) -> Unit,
     onRenameDevice: (String, String) -> Unit,
     authManager: AuthManager? = null,
+    onOpenTvDebloat: () -> Unit = {},
+    onOpenTvHomeThemes: () -> Unit = {},
+    adbConnectedHost: String? = null,
     modifier: Modifier = Modifier
 ) {
     val scrollState = rememberScrollState()
@@ -302,7 +305,128 @@ fun SettingsScreen(
                 }
             }
 
-            // 4. ABOUT & PROTOCOL SPEC
+            // 4. TV DEBLOAT & PRIVACY
+            GlassCard(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("settings_tv_debloat_card"),
+                shape = RoundedCornerShape(22.dp),
+                onClick = onOpenTvDebloat
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .defaultMinSize(minHeight = 64.dp)
+                        .padding(18.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(42.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(Color(0xFF0284C7).copy(alpha = 0.18f))
+                                .border(1.dp, GlassBorderStrong, RoundedCornerShape(12.dp)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Shield,
+                                contentDescription = null,
+                                tint = ElectricBlueLight,
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text(
+                                text = "TV DEBLOAT & PRIVACY",
+                                style = Typography.labelSmall.copy(fontWeight = FontWeight.Bold, letterSpacing = 1.sp),
+                                color = ElectricBlueLight
+                            )
+                            Text(
+                                text = "Manage preinstalled TV apps, privacy services and background packages.",
+                                style = Typography.bodySmall,
+                                color = TextSecondary
+                            )
+                            if (adbConnectedHost != null) {
+                                Text(
+                                    text = "ADB Connected: $adbConnectedHost",
+                                    style = Typography.labelSmall,
+                                    color = StatusSuccessGreen
+                                )
+                            }
+                        }
+                    }
+                    Icon(
+                        imageVector = Icons.Default.ChevronRight,
+                        contentDescription = "Open TV Debloat & Privacy",
+                        tint = TextSecondary
+                    )
+                }
+            }
+
+            // 5. TV HOME & THEMES (CLEANYOURTV)
+            GlassCard(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("settings_tv_home_themes_card"),
+                shape = RoundedCornerShape(22.dp),
+                onClick = onOpenTvHomeThemes
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .defaultMinSize(minHeight = 64.dp)
+                        .padding(18.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(42.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(Color(0xFF0284C7).copy(alpha = 0.18f))
+                                .border(1.dp, GlassBorderStrong, RoundedCornerShape(12.dp)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Palette,
+                                contentDescription = null,
+                                tint = ElectricBlueLight,
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text(
+                                text = "TV HOME & THEMES",
+                                style = Typography.labelSmall.copy(fontWeight = FontWeight.Bold, letterSpacing = 1.sp),
+                                color = ElectricBlueLight
+                            )
+                            Text(
+                                text = "Change the TV home screen and customise its appearance.",
+                                style = Typography.bodySmall,
+                                color = TextSecondary
+                            )
+                        }
+                    }
+                    Icon(
+                        imageVector = Icons.Default.ChevronRight,
+                        contentDescription = "Open TV Home & Themes",
+                        tint = TextSecondary
+                    )
+                }
+            }
+
+            // 6. ABOUT & PROTOCOL SPEC + ATTRIBUTION
             GlassCard(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(22.dp)
@@ -329,6 +453,12 @@ fun SettingsScreen(
                         text = "Features low-latency Android TV Remote Protocol v2 (TCP 6466), MediaProjection real-time Screen Mirroring, Local Media Casting (VLC), and secure Firebase Google Authentication.",
                         style = Typography.bodySmall,
                         color = Color(0xFF94A3B8)
+                    )
+
+                    Text(
+                        text = "TV Debloat & Home customization adapted with attribution from CleanYourTV (Gathin23/cleanyourtv, MIT License) • Outfit Font (SIL OFL) • CC0 scenic themes.",
+                        style = Typography.labelSmall,
+                        color = TextMuted
                     )
                 }
             }

@@ -49,10 +49,22 @@ import com.gala.motetv.ui.screens.SignInScreen
 
 import com.gala.motetv.mirror.ScreenMirrorController
 import com.gala.motetv.ui.screens.MirrorScreen
+import com.gala.motetv.adb.AdbConnectionManagerImpl
+import com.gala.motetv.adb.AdbConnectionState
+import com.gala.motetv.adb.AdbCredentialStore
+import com.gala.motetv.debloat.DebloatManager
+import com.gala.motetv.debloat.DebloatRepository
+import com.gala.motetv.debloat.TvPackageScanner
+import com.gala.motetv.tvhome.CleanYourTvLauncherManager
+import com.gala.motetv.tvhome.CleanYourTvThemeManager
+import com.gala.motetv.ui.screens.TvDebloatScreen
+import com.gala.motetv.ui.screens.TvHomeThemesScreen
 
 enum class MainDisplayMode {
     TABS,
-    DEVICES
+    DEVICES,
+    TV_DEBLOAT,
+    TV_HOME_THEMES
 }
 
 class MainActivity : ComponentActivity() {
@@ -65,11 +77,17 @@ class MainActivity : ComponentActivity() {
     private lateinit var mirrorController: ScreenMirrorController
     private lateinit var networkMonitor: NetworkMonitor
     private lateinit var authManager: AuthManager
+    private lateinit var adbCredentialStore: AdbCredentialStore
+    private lateinit var adbConnectionManager: AdbConnectionManagerImpl
+    private lateinit var debloatRepository: DebloatRepository
+    private lateinit var debloatManager: DebloatManager
+    private lateinit var cleanYourTvLauncherManager: CleanYourTvLauncherManager
+    private lateinit var cleanYourTvThemeManager: CleanYourTvThemeManager
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        TvLogger.i(TvLogger.TAG_GENERAL, "MoteTV Android TV Remote initialized (v2.0 Light Glass Edition)")
+        TvLogger.i(TvLogger.TAG_GENERAL, "MoteTV Android TV Remote initialized (v2.5 Cyber Glass Edition)")
 
         credentialStore = TvCredentialStore(applicationContext)
         discoveryManager = NsdTvDiscoveryManager(applicationContext)
@@ -79,6 +97,14 @@ class MainActivity : ComponentActivity() {
         mirrorController = ScreenMirrorController(applicationContext, remoteManager)
         networkMonitor = NetworkMonitor(applicationContext)
         authManager = AuthManager(applicationContext)
+
+        adbCredentialStore = AdbCredentialStore(applicationContext)
+        adbConnectionManager = AdbConnectionManagerImpl(applicationContext, adbCredentialStore)
+        debloatRepository = DebloatRepository(applicationContext)
+        val scanner = TvPackageScanner(adbConnectionManager, debloatRepository)
+        debloatManager = DebloatManager(adbConnectionManager, scanner, debloatRepository)
+        cleanYourTvLauncherManager = CleanYourTvLauncherManager(applicationContext, adbConnectionManager)
+        cleanYourTvThemeManager = CleanYourTvThemeManager(adbConnectionManager)
 
         networkMonitor.startMonitoring(
             onNetworkAvailable = { isWifi ->
@@ -110,7 +136,11 @@ class MainActivity : ComponentActivity() {
                         remoteManager = remoteManager,
                         castController = castController,
                         mirrorController = mirrorController,
-                        authManager = authManager
+                        authManager = authManager,
+                        adbConnectionManager = adbConnectionManager,
+                        debloatManager = debloatManager,
+                        cleanYourTvLauncherManager = cleanYourTvLauncherManager,
+                        cleanYourTvThemeManager = cleanYourTvThemeManager
                     )
                 }
             }
@@ -127,6 +157,8 @@ class MainActivity : ComponentActivity() {
         super.onDestroy()
         discoveryManager.stopDiscovery()
         remoteManager.disconnect()
+        adbConnectionManager.stopWirelessDiscovery()
+        adbConnectionManager.disconnect()
         // Do NOT call castController.stopCast() here!
         // Casting is owned by MediaStreamService and must continue playing while screen is off,
         // device is locked, or activity is recreated.
@@ -144,7 +176,11 @@ fun MainAppHost(
     remoteManager: TvRemoteManagerImpl,
     castController: LocalMediaCastController,
     mirrorController: ScreenMirrorController,
-    authManager: AuthManager
+    authManager: AuthManager,
+    adbConnectionManager: AdbConnectionManagerImpl,
+    debloatManager: DebloatManager,
+    cleanYourTvLauncherManager: CleanYourTvLauncherManager,
+    cleanYourTvThemeManager: CleanYourTvThemeManager
 ) {
     var displayMode by remember { mutableStateOf(MainDisplayMode.TABS) }
     var selectedTab by remember { mutableStateOf(NavTab.REMOTE) }
@@ -170,6 +206,8 @@ fun MainAppHost(
     val castSessionState by castController.sessionState.collectAsStateWithLifecycle()
     val imeActive by remoteManager.imeActive.collectAsStateWithLifecycle()
     val lastImeText by remoteManager.lastImeText.collectAsStateWithLifecycle()
+    val adbState by adbConnectionManager.connectionState.collectAsStateWithLifecycle()
+    val tvHomeLauncherStatus by cleanYourTvLauncherManager.launcherStatus.collectAsStateWithLifecycle()
     val context = LocalContext.current
 
     val mediaPickerLauncher = rememberLauncherForActivityResult(
@@ -379,7 +417,15 @@ fun MainAppHost(
                                     if (targetDevice?.id == devId) {
                                         targetDevice = targetDevice?.copy(name = newName)
                                     }
-                                }
+                                },
+                                authManager = authManager,
+                                onOpenTvDebloat = {
+                                    displayMode = MainDisplayMode.TV_DEBLOAT
+                                },
+                                onOpenTvHomeThemes = {
+                                    displayMode = MainDisplayMode.TV_HOME_THEMES
+                                },
+                                adbConnectedHost = (adbState as? AdbConnectionState.Connected)?.let { "${it.host}:${it.port}" }
                             )
                         }
                     }
@@ -405,6 +451,27 @@ fun MainAppHost(
                     displayMode = MainDisplayMode.TABS
                     onConnectToDevice(dev)
                 },
+                onBack = { displayMode = MainDisplayMode.TABS }
+            )
+        }
+
+        MainDisplayMode.TV_DEBLOAT -> {
+            TvDebloatScreen(
+                adbManager = adbConnectionManager,
+                debloatManager = debloatManager,
+                currentRemoteDevice = targetDevice,
+                isCleanYourTvActiveHome = tvHomeLauncherStatus.isCleanYourTvActiveHome,
+                isCleanYourTvInstalled = tvHomeLauncherStatus.isCleanYourTvInstalled,
+                onBack = { displayMode = MainDisplayMode.TABS }
+            )
+        }
+
+        MainDisplayMode.TV_HOME_THEMES -> {
+            TvHomeThemesScreen(
+                adbManager = adbConnectionManager,
+                launcherManager = cleanYourTvLauncherManager,
+                themeManager = cleanYourTvThemeManager,
+                currentRemoteDevice = targetDevice,
                 onBack = { displayMode = MainDisplayMode.TABS }
             )
         }

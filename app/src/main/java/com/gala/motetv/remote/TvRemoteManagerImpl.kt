@@ -6,6 +6,7 @@ import com.gala.motetv.core.model.ConnectionState
 import com.gala.motetv.core.model.TvDevice
 import com.gala.motetv.pairing.TvIdentity
 import com.gala.motetv.protocol.androidtv.AndroidTvTransport
+import com.gala.motetv.protocol.androidtv.FrameWriteException
 import com.gala.motetv.protocol.androidtv.ProtoFrameReader
 import com.gala.motetv.protocol.androidtv.ProtoFrameWriter
 import com.gala.motetv.protocol.androidtv.TvTransport
@@ -28,7 +29,6 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.yield
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -62,6 +62,7 @@ class TvRemoteManagerImpl(
         const val HANDSHAKE_SET_ACTIVE_TIMEOUT_MS = 3000L
         const val MAX_BACKOFF_DELAY_MS = 15000L
         val BACKOFF_DELAYS = longArrayOf(1000L, 2000L, 4000L, 8000L, 15000L)
+        private const val MAX_REASON_HISTORY = 8
     }
 
     private val _connectionState = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
@@ -83,28 +84,41 @@ class TvRemoteManagerImpl(
     override val connectionDiagnostics: StateFlow<ConnectionDiagnostics> = _diagnostics.asStateFlow()
 
     // Command Queue
-    private val commandQueue = RemoteCommandQueue()
+    private val commandQueue = RemoteCommandQueue(timeProvider = timeProvider)
 
     // Concurrency & Session Management
     private val connectionMutex = Mutex()
     private val writeMutex = Mutex()
+    private val reconnectLock = Any()
     private val sessionCounter = AtomicLong(0)
+    @Volatile
     private var activeSessionId = 0L
 
+    @Volatile
     private var transport: TvTransport? = null
     private var readLoopJob: Job? = null
     private var healthMonitorJob: Job? = null
     private var reconnectJob: Job? = null
     private var connectionAttemptJob: Job? = null
+    @Volatile
+    private var reconnectIsImmediate: Boolean = false
+    @Volatile
+    private var isConnectingOrHandshaking: Boolean = false
 
     private var retryCount = 0
+    @Volatile
     private var intentionalDisconnect = false
 
-    // Health monitoring state
+    // Health monitoring state (inbound and outbound kept strictly separate)
+    @Volatile
     private var lastReceivedFrameTimeMs: Long = 0L
+    @Volatile
     private var lastOutboundFrameTimeMs: Long = 0L
+    @Volatile
     private var lastPingSentTimeMs: Long = 0L
+    @Volatile
     private var isPingOutstanding: Boolean = false
+    @Volatile
     private var outstandingPingVal: Int = 0
     private val pingSeqCounter = AtomicInteger(1)
 
@@ -113,6 +127,10 @@ class TvRemoteManagerImpl(
 
     private var lastSuccessfulConnectTimeMs: Long = 0L
     private var lastDisconnectReason: String = "None"
+    private val recentReconnectReasons = ArrayDeque<String>()
+    private var coalescedReconnectCount: Int = 0
+    private var uncertainDeliveryCount: Int = 0
+    private var lastUncertainCommand: String? = null
 
     private var configureReceivedDeferred: CompletableDeferred<Unit>? = null
     private var setActiveReceivedDeferred: CompletableDeferred<Unit>? = null
@@ -130,19 +148,22 @@ class TvRemoteManagerImpl(
         _currentDevice.value = device
         updateDiagnostics()
 
-        // Cancel any pending reconnect job
-        cancelScheduledReconnect()
-
-        connectionAttemptJob?.cancel()
-        connectionAttemptJob = scope.launch(ioDispatcher) {
-            performConnect(device, currentRetry = 0)
+        synchronized(reconnectLock) {
+            cancelScheduledReconnectInternal()
+            connectionAttemptJob?.cancel()
+            connectionAttemptJob = scope.launch(ioDispatcher) {
+                performConnect(device, currentRetry = 0)
+            }
         }
     }
 
     override fun disconnect() {
         intentionalDisconnect = true
-        cancelScheduledReconnect()
-        connectionAttemptJob?.cancel()
+        synchronized(reconnectLock) {
+            cancelScheduledReconnectInternal()
+            connectionAttemptJob?.cancel()
+            connectionAttemptJob = null
+        }
 
         scope.launch(ioDispatcher) {
             connectionMutex.withLock {
@@ -155,7 +176,7 @@ class TvRemoteManagerImpl(
                 updateRemoteState(RemoteState.DISCONNECTED)
                 _connectionState.value = ConnectionState.Disconnected
                 _currentDevice.value = null
-                lastDisconnectReason = "User requested disconnect"
+                recordDisconnectReason("User requested disconnect")
                 updateDiagnostics()
                 TvLogger.i(TvLogger.TAG_REMOTE, "[$sessionId] Disconnected remote control session")
             }
@@ -169,14 +190,12 @@ class TvRemoteManagerImpl(
             _currentDevice.value = dev
         }
 
-        val state = _connectionState.value
-        val isHealthy = state is ConnectionState.Ready &&
-                transport?.isConnected == true &&
-                (timeProvider() - lastReceivedFrameTimeMs) < (PING_INTERVAL_MS + PING_DEADLINE_MS)
-
-        if (!isHealthy && state !is ConnectionState.Connecting) {
-            TvLogger.i(TvLogger.TAG_REMOTE, "reconnectIfDisconnected: State is ${state::class.simpleName}, requesting reconnect to ${dev.name}")
-            requestReconnect(reason = "reconnectIfDisconnected", immediate = true)
+        if (!isSessionHealthy()) {
+            val state = _connectionState.value
+            if (state !is ConnectionState.Connecting) {
+                TvLogger.i(TvLogger.TAG_REMOTE, "reconnectIfDisconnected: Session unhealthy (state=${state::class.simpleName}), requesting reconnect to ${dev.name}")
+                requestReconnect(reason = "reconnectIfDisconnected", immediate = true)
+            }
         }
     }
 
@@ -185,14 +204,20 @@ class TvRemoteManagerImpl(
         val current = _connectionState.value
         TvLogger.w(TvLogger.TAG_REMOTE, "Active network lost. Invalidating session (currently ${current::class.simpleName}).")
 
-        // Cancel current session immediately
+        synchronized(reconnectLock) {
+            cancelScheduledReconnectInternal()
+            connectionAttemptJob?.cancel()
+            connectionAttemptJob = null
+        }
+
         val sessionId = sessionCounter.incrementAndGet()
         activeSessionId = sessionId
 
-        scope.launch {
+        scope.launch(ioDispatcher) {
             connectionMutex.withLock {
                 tearDownSessionInternal(closeTransport = true)
-                lastDisconnectReason = "Network lost"
+                recordDisconnectReason("Network lost")
+                updateRemoteState(RemoteState.DISCONNECTED)
                 if (_currentDevice.value != null) {
                     _connectionState.value = ConnectionState.Reconnecting(attempt = retryCount + 1, nextDelayMs = 0L)
                 } else {
@@ -206,28 +231,21 @@ class TvRemoteManagerImpl(
     override fun onNetworkRestored() {
         if (intentionalDisconnect) return
         val dev = _currentDevice.value ?: credentialStore.getSavedDevices().firstOrNull() ?: return
-        TvLogger.i(TvLogger.TAG_REMOTE, "Network restored. Triggering reconnect to ${dev.name}.")
+        if (_currentDevice.value == null) {
+            _currentDevice.value = dev
+        }
+        TvLogger.i(TvLogger.TAG_REMOTE, "Network restored. Verifying remote connection to ${dev.name}.")
 
-        val isHealthy = _connectionState.value is ConnectionState.Ready &&
-                transport?.isConnected == true &&
-                (timeProvider() - lastReceivedFrameTimeMs) < (PING_INTERVAL_MS + PING_DEADLINE_MS)
-
-        if (!isHealthy) {
+        if (!isSessionHealthy()) {
             requestReconnect(reason = "Network restored", immediate = true)
         }
     }
 
     override fun onAppResume() {
         if (intentionalDisconnect) return
-        val dev = _currentDevice.value ?: return
+        if (_currentDevice.value == null) return
 
-        val now = timeProvider()
-        val isHealthy = _connectionState.value is ConnectionState.Ready &&
-                transport?.isConnected == true &&
-                lastReceivedFrameTimeMs > 0L &&
-                (now - lastReceivedFrameTimeMs) < (PING_INTERVAL_MS + PING_DEADLINE_MS)
-
-        if (isHealthy) {
+        if (isSessionHealthy()) {
             TvLogger.d(TvLogger.TAG_REMOTE, "App resumed; current remote session is healthy, skipping reconnect.")
         } else {
             TvLogger.i(TvLogger.TAG_REMOTE, "App resumed with unhealthy or disconnected state (${_connectionState.value::class.simpleName}); reconnecting.")
@@ -235,56 +253,97 @@ class TvRemoteManagerImpl(
         }
     }
 
-    private fun requestReconnect(reason: String, immediate: Boolean = false) {
+    private fun isSessionHealthy(now: Long = timeProvider()): Boolean {
+        val state = _connectionState.value
+        val t = transport ?: return false
+        if (state !is ConnectionState.Ready) return false
+        if (_remoteState.value != RemoteState.READY) return false
+        if (activeSessionId <= 0L) return false
+        if (!t.isConnected) return false
+        if (lastReceivedFrameTimeMs <= 0L) return false
+        if ((now - lastReceivedFrameTimeMs) >= (PING_INTERVAL_MS + PING_DEADLINE_MS)) return false
+        if (isPingOutstanding && (now - lastPingSentTimeMs) > PING_DEADLINE_MS) return false
+        return true
+    }
+
+    private fun requestReconnect(
+        reason: String,
+        immediate: Boolean = false,
+        fromConnectFailure: Boolean = false
+    ) {
         if (intentionalDisconnect) return
         val device = _currentDevice.value ?: return
 
-        lastDisconnectReason = reason
-        cancelScheduledReconnect()
+        synchronized(reconnectLock) {
+            recordDisconnectReason(reason)
 
-        reconnectJob = scope.launch(ioDispatcher) {
-            val attempt = retryCount + 1
-            if (!immediate && attempt > 0) {
-                val delayIndex = (attempt - 1).coerceAtMost(BACKOFF_DELAYS.size - 1)
-                val baseDelay = BACKOFF_DELAYS[delayIndex]
-                val jitter = (baseDelay * (0.8 + 0.4 * Math.random())).toLong()
-
-                if (attempt >= 5) {
-                    _connectionState.value = ConnectionState.Failed(
-                        errorCode = "ERR_REMOTE_CONNECT",
-                        userMessage = "TV offline or sleeping. Retrying...",
-                        technicalDetail = reason
-                    )
-                } else {
-                    _connectionState.value = ConnectionState.Reconnecting(attempt = attempt, nextDelayMs = jitter)
-                }
+            if (!fromConnectFailure && isConnectingOrHandshaking) {
+                coalescedReconnectCount++
                 updateDiagnostics()
-                TvLogger.i(TvLogger.TAG_REMOTE, "Reconnection scheduled in ${jitter}ms (attempt $attempt, reason: $reason)")
-                delay(jitter)
+                TvLogger.d(TvLogger.TAG_REMOTE, "Coalescing reconnect '$reason' with in-progress connection attempt")
+                return
             }
 
-            performConnect(device, attempt)
+            val existing = reconnectJob
+            if (!fromConnectFailure && existing?.isActive == true) {
+                if (reconnectIsImmediate || !immediate) {
+                    coalescedReconnectCount++
+                    updateDiagnostics()
+                    TvLogger.d(TvLogger.TAG_REMOTE, "Coalescing duplicate reconnect trigger '$reason'")
+                    return
+                }
+                existing.cancel()
+            } else if (fromConnectFailure && existing?.isActive == true) {
+                existing.cancel()
+            }
+
+            reconnectIsImmediate = immediate
+            reconnectJob = scope.launch(ioDispatcher) {
+                val attempt = retryCount + 1
+                if (!immediate && attempt > 0) {
+                    val delayIndex = (attempt - 1).coerceAtMost(BACKOFF_DELAYS.size - 1)
+                    val baseDelay = BACKOFF_DELAYS[delayIndex]
+                    val jitter = (baseDelay * (0.8 + 0.4 * Math.random())).toLong()
+
+                    if (attempt >= 5) {
+                        _connectionState.value = ConnectionState.Failed(
+                            errorCode = "ERR_REMOTE_CONNECT",
+                            userMessage = "TV offline or sleeping. Retrying...",
+                            technicalDetail = reason
+                        )
+                    } else {
+                        _connectionState.value = ConnectionState.Reconnecting(attempt = attempt, nextDelayMs = jitter)
+                    }
+                    updateDiagnostics()
+                    TvLogger.i(TvLogger.TAG_REMOTE, "Reconnection scheduled in ${jitter}ms (attempt $attempt, reason: $reason)")
+                    delay(jitter)
+                }
+
+                if (!intentionalDisconnect) {
+                    performConnect(device, attempt)
+                }
+            }
         }
     }
 
-    private fun cancelScheduledReconnect() {
+    private fun cancelScheduledReconnectInternal() {
         reconnectJob?.cancel()
         reconnectJob = null
+        reconnectIsImmediate = false
     }
 
     private suspend fun performConnect(device: TvDevice, currentRetry: Int) = connectionMutex.withLock {
         if (intentionalDisconnect) return@withLock
 
-        // Check if current connection is already ready and connected to this device
-        if (_connectionState.value is ConnectionState.Ready && transport?.isConnected == true && activeSessionId > 0) {
-            TvLogger.d(TvLogger.TAG_REMOTE, "Already ready and connected to ${device.name}; skipping redundant connect")
+        if (isSessionHealthy() && _currentDevice.value?.id == device.id) {
+            TvLogger.d(TvLogger.TAG_REMOTE, "Already healthy and connected to ${device.name}; skipping redundant connect")
             return@withLock
         }
 
         val sessionId = sessionCounter.incrementAndGet()
         activeSessionId = sessionId
+        isConnectingOrHandshaking = true
 
-        // Completely tear down previous transport and listeners
         tearDownSessionInternal(closeTransport = true)
 
         try {
@@ -314,10 +373,8 @@ class TvRemoteManagerImpl(
             configureReceivedDeferred = CompletableDeferred()
             setActiveReceivedDeferred = CompletableDeferred()
 
-            // Step 1: Start single reader loop for this session
             startReaderLoop(reader, device, sessionId)
 
-            // Step 2: TX RemoteConfigure
             TvLogger.i(TvLogger.TAG_REMOTE, "[$sessionId] Sending RemoteConfigure (code1=622)")
             val configureMsg = RemoteMessage(
                 remote_configure = RemoteConfigure(
@@ -335,14 +392,12 @@ class TvRemoteManagerImpl(
             sendRemoteMessageDirect(writer, configureMsg, sessionId)
             updateRemoteState(RemoteState.CONFIGURE_SENT)
 
-            // Step 3: Wait for RX RemoteConfigure from TV
             TvLogger.i(TvLogger.TAG_REMOTE, "[$sessionId] Waiting for RemoteConfigure from TV...")
             withTimeout(HANDSHAKE_CONFIGURE_TIMEOUT_MS) {
                 configureReceivedDeferred?.await()
             }
             updateRemoteState(RemoteState.CONFIGURED)
 
-            // Step 4: TX RemoteSetActive
             TvLogger.i(TvLogger.TAG_REMOTE, "[$sessionId] Sending RemoteSetActive (active=622)")
             val setActiveMsg = RemoteMessage(
                 remote_set_active = RemoteSetActive(active = 622)
@@ -350,7 +405,6 @@ class TvRemoteManagerImpl(
             sendRemoteMessageDirect(writer, setActiveMsg, sessionId)
             updateRemoteState(RemoteState.SET_ACTIVE_SENT)
 
-            // Step 5: Optional wait for RemoteSetActive / RemoteStart ack
             withTimeoutOrNull(HANDSHAKE_SET_ACTIVE_TIMEOUT_MS) {
                 setActiveReceivedDeferred?.await()
             }
@@ -360,31 +414,40 @@ class TvRemoteManagerImpl(
                 return@withLock
             }
 
-            // Step 6: Session is READY!
+            // Session is READY! Record valid handshake timestamp only from TV handshake frames.
             updateRemoteState(RemoteState.READY)
             _connectionState.value = ConnectionState.Ready(device)
-            retryCount = 0 // Reset retry count strictly on successful protocol session!
-            lastSuccessfulConnectTimeMs = timeProvider()
-            lastReceivedFrameTimeMs = timeProvider()
+            retryCount = 0
+            val now = timeProvider()
+            lastSuccessfulConnectTimeMs = now
+            if (lastReceivedFrameTimeMs == 0L || lastReceivedFrameTimeMs < lastSuccessfulConnectTimeMs) {
+                lastReceivedFrameTimeMs = now
+            }
             isPingOutstanding = false
+            outstandingPingVal = 0
+            isConnectingOrHandshaking = false
             updateDiagnostics()
 
             TvLogger.i(TvLogger.TAG_REMOTE, "[$sessionId] Remote session READY! TV control active.")
 
-            // Start health monitor for this session
             startHealthMonitor(sessionId)
-
-            // Drain queued commands in original order
             drainCommandQueue(writer, sessionId)
 
         } catch (e: Exception) {
+            isConnectingOrHandshaking = false
             TvLogger.w(TvLogger.TAG_REMOTE, "[$sessionId] Connection attempt failed: ${e.message}")
             if (activeSessionId == sessionId) {
                 tearDownSessionInternal(closeTransport = true)
                 updateRemoteState(RemoteState.ERROR)
                 updateDiagnostics()
-                requestReconnect(reason = "Connection attempt failed: ${e.message}", immediate = false)
+                requestReconnect(
+                    reason = "Connection attempt failed: ${e.message}",
+                    immediate = false,
+                    fromConnectFailure = true
+                )
             }
+        } finally {
+            isConnectingOrHandshaking = false
         }
     }
 
@@ -395,13 +458,14 @@ class TvRemoteManagerImpl(
                 while (isActive && activeSessionId == sessionId && transport?.isConnected == true) {
                     try {
                         val frameBytes = reader.readNextFrame()
+                        val msg = RemoteMessage.ADAPTER.decode(frameBytes)
+                        if (activeSessionId != sessionId) break
+
+                        // Only update lastReceivedFrameTimeMs when a valid incoming TV frame is decoded
                         lastReceivedFrameTimeMs = timeProvider()
                         updateDiagnostics()
-
-                        val msg = RemoteMessage.ADAPTER.decode(frameBytes)
                         handleIncomingMessage(msg, sessionId)
                     } catch (e: SocketTimeoutException) {
-                        // Harmless idle timeout while socket is waiting for TV frames
                         if (activeSessionId != sessionId) break
                         delay(200L)
                     }
@@ -409,6 +473,11 @@ class TvRemoteManagerImpl(
             } catch (e: Exception) {
                 if (activeSessionId == sessionId && !intentionalDisconnect) {
                     TvLogger.w(TvLogger.TAG_REMOTE, "[$sessionId] Reader loop terminated: ${e.message}")
+                    try {
+                        transport?.close()
+                    } catch (_: Exception) {}
+                    updateRemoteState(RemoteState.DISCONNECTED)
+                    _connectionState.value = ConnectionState.Reconnecting(attempt = retryCount + 1, nextDelayMs = 0L)
                     requestReconnect(reason = "Reader loop: ${e.message}", immediate = false)
                 }
             }
@@ -441,7 +510,7 @@ class TvRemoteManagerImpl(
                 val pongMsg = RemoteMessage(
                     remote_ping_response = RemotePingResponse(val1 = pingVal)
                 )
-                scope.launch(Dispatchers.IO) {
+                scope.launch(ioDispatcher) {
                     try {
                         sendRemoteMessage(pongMsg, sessionId)
                     } catch (e: Exception) {
@@ -465,6 +534,10 @@ class TvRemoteManagerImpl(
             msg.remote_error != null -> {
                 val err = msg.remote_error
                 TvLogger.e(TvLogger.TAG_REMOTE, "[$sessionId] REMOTE RX: RemoteError value=${err.value} message=${err.message}")
+                try {
+                    transport?.close()
+                } catch (_: Exception) {}
+                updateRemoteState(RemoteState.ERROR)
                 requestReconnect(reason = "TV sent RemoteError: ${err.message}", immediate = true)
             }
 
@@ -492,17 +565,16 @@ class TvRemoteManagerImpl(
                 val now = timeProvider()
 
                 if (isPingOutstanding) {
-                    // Check if ping response deadline expired
                     if (now - lastPingSentTimeMs > PING_DEADLINE_MS) {
                         TvLogger.w(TvLogger.TAG_REMOTE, "[$sessionId] Health monitor: TV ping response deadline exceeded (${now - lastPingSentTimeMs}ms > ${PING_DEADLINE_MS}ms). Marking connection dead.")
                         tearDownSessionInternal(closeTransport = true)
+                        updateRemoteState(RemoteState.DISCONNECTED)
                         _connectionState.value = ConnectionState.Reconnecting(attempt = retryCount + 1, nextDelayMs = 0L)
                         updateDiagnostics()
                         requestReconnect(reason = "Ping response deadline exceeded", immediate = true)
                         break
                     }
                 } else {
-                    // Send ping if idle beyond PING_INTERVAL_MS
                     if (now - lastReceivedFrameTimeMs >= PING_INTERVAL_MS) {
                         val seq = pingSeqCounter.getAndIncrement()
                         TvLogger.d(TvLogger.TAG_REMOTE, "[$sessionId] Health monitor: Sending keepalive ping (seq=$seq)")
@@ -518,9 +590,8 @@ class TvRemoteManagerImpl(
                             sendRemoteMessage(pingMsg, sessionId)
                         } catch (e: Exception) {
                             TvLogger.w(TvLogger.TAG_REMOTE, "[$sessionId] Health monitor: Failed to write ping: ${e.message}")
-                            isPingOutstanding = false
-                            outstandingPingVal = 0
                             tearDownSessionInternal(closeTransport = true)
+                            updateRemoteState(RemoteState.DISCONNECTED)
                             _connectionState.value = ConnectionState.Reconnecting(attempt = retryCount + 1, nextDelayMs = 0L)
                             updateDiagnostics()
                             requestReconnect(reason = "Failed to write ping: ${e.message}", immediate = true)
@@ -545,6 +616,7 @@ class TvRemoteManagerImpl(
         writeMutex.withLock {
             if (activeSessionId != sessionId) throw IOException("Session expired")
             val trans = transport ?: throw IOException("Transport unavailable")
+            if (!trans.isConnected) throw IOException("Transport disconnected")
             val writer = trans.frameWriter ?: throw IOException("Writer unavailable")
             val payload = message.encode()
             writer.writeFrame(payload)
@@ -556,7 +628,6 @@ class TvRemoteManagerImpl(
         val keyName = AndroidTvKeyCodes.getKeyName(keyCode)
         TvLogger.d(TvLogger.TAG_REMOTE, "sendKey called: $keyName ($keyCode, ${direction.name})")
 
-        // Track key press state for START_LONG and END_LONG
         when (direction) {
             Direction.START_LONG -> currentlyHeldKeyCodes.add(keyCode)
             Direction.END_LONG -> currentlyHeldKeyCodes.remove(keyCode)
@@ -564,7 +635,11 @@ class TvRemoteManagerImpl(
             else -> {}
         }
 
-        val cmd = QueuedRemoteCommand.KeyCommand(keyCode, direction)
+        val cmd = QueuedRemoteCommand.KeyCommand(
+            keyCode = keyCode,
+            direction = direction,
+            createdAtMs = timeProvider()
+        )
         enqueueAndDispatchCommand(cmd)
     }
 
@@ -587,7 +662,7 @@ class TvRemoteManagerImpl(
             return
         }
 
-        val cmd = QueuedRemoteCommand.ImeCommand(text)
+        val cmd = QueuedRemoteCommand.ImeCommand(text = text, createdAtMs = timeProvider())
         enqueueAndDispatchCommand(cmd)
     }
 
@@ -601,29 +676,21 @@ class TvRemoteManagerImpl(
     }
 
     override fun launchAppLink(appLink: String) {
-        val cmd = QueuedRemoteCommand.AppLinkCommand(appLink)
+        val cmd = QueuedRemoteCommand.AppLinkCommand(appLink = appLink, createdAtMs = timeProvider())
         enqueueAndDispatchCommand(cmd)
     }
 
-    /**
-     * Unified, serialized command dispatch path.
-     * Enqueues the command into the bounded queue. If session is READY, asynchronously drains
-     * the queue through the serialized writer. If disconnected, triggers reconnection.
-     */
     private fun enqueueAndDispatchCommand(command: QueuedRemoteCommand) {
-        val queued = commandQueue.enqueue(command)
+        commandQueue.enqueue(command)
         updateDiagnostics()
 
-        val isReady = _connectionState.value is ConnectionState.Ready &&
-                _remoteState.value == RemoteState.READY &&
-                transport?.isConnected == true
-
+        val isReady = isSessionHealthy()
         if (isReady) {
             val sessionId = activeSessionId
             scope.launch(ioDispatcher) {
                 val trans = transport
                 val writer = trans?.frameWriter
-                if (writer != null && activeSessionId == sessionId && _remoteState.value == RemoteState.READY) {
+                if (writer != null && activeSessionId == sessionId && _remoteState.value == RemoteState.READY && trans.isConnected) {
                     drainCommandQueue(writer, sessionId)
                 } else if (!intentionalDisconnect) {
                     reconnectIfDisconnected()
@@ -634,23 +701,25 @@ class TvRemoteManagerImpl(
         }
     }
 
-    /**
-     * Drains the command queue one-by-one under writeMutex lock.
-     * Each command is ONLY removed from the queue AFTER successful transmission.
-     * If write fails, the command remains in queue (or is discarded if expired)
-     * and delivery aborts safely without replaying unattempted commands.
-     */
     private suspend fun drainCommandQueue(writer: ProtoFrameWriter, sessionId: Long) {
         writeMutex.withLock {
             while (true) {
-                if (activeSessionId != sessionId || _remoteState.value != RemoteState.READY) {
-                    TvLogger.w(TvLogger.TAG_REMOTE, "[$sessionId] Queue draining halted: session no longer ready")
+                if (activeSessionId != sessionId || _remoteState.value != RemoteState.READY || transport?.isConnected != true) {
+                    TvLogger.w(TvLogger.TAG_REMOTE, "[$sessionId] Queue draining halted: session or transport not ready")
+                    if (activeSessionId == sessionId && !intentionalDisconnect) {
+                        try {
+                            transport?.close()
+                        } catch (_: Exception) {}
+                        updateRemoteState(RemoteState.DISCONNECTED)
+                        _connectionState.value = ConnectionState.Reconnecting(attempt = retryCount + 1, nextDelayMs = 0L)
+                        requestReconnect(reason = "Transport disconnected before command write", immediate = true)
+                    }
                     break
                 }
 
                 val cmd = commandQueue.peekNextValid() ?: break
 
-                if (cmd.isExpired) {
+                if (commandQueue.isCommandExpired(cmd)) {
                     TvLogger.d(TvLogger.TAG_REMOTE, "[$sessionId] Discarding expired command (id=${cmd.commandId})")
                     commandQueue.removeHead(cmd)
                     continue
@@ -672,7 +741,6 @@ class TvRemoteManagerImpl(
                     val payload = message.encode()
                     writer.writeFrame(payload)
 
-                    // Successfully transmitted: remove from queue head
                     commandQueue.removeHead(cmd)
                     lastOutboundFrameTimeMs = timeProvider()
 
@@ -689,16 +757,51 @@ class TvRemoteManagerImpl(
                         }
                     }
 
-                    delay(15) // Pacing between queued commands
+                    delay(15)
                 } catch (e: Exception) {
-                    TvLogger.e(TvLogger.TAG_REMOTE, "[$sessionId] Transmission failed for command ${cmd.commandId}: ${e.message}", e)
-                    // Do NOT remove from queue if delivery failed before transmission
-                    // However, if write threw midway, delivery status is uncertain
-                    requestReconnect(reason = "Command transmission failed: ${e.message}", immediate = true)
+                    val bytesWrittenStarted = (e as? FrameWriteException)?.bytesWrittenStarted ?: true
+                    val desc = describeCommand(cmd)
+                    if (bytesWrittenStarted) {
+                        val isEndLong = cmd is QueuedRemoteCommand.KeyCommand && cmd.direction == Direction.END_LONG
+                        uncertainDeliveryCount++
+                        if (isEndLong) {
+                            lastUncertainCommand = "$desc [kept for release]"
+                            TvLogger.w(TvLogger.TAG_REMOTE, "[$sessionId] Mid-write failure for release command $desc; keeping in queue to prevent stuck key: ${e.message}")
+                        } else {
+                            commandQueue.removeHead(cmd)
+                            lastUncertainCommand = desc
+                            TvLogger.e(TvLogger.TAG_REMOTE, "[$sessionId] Uncertain delivery for $desc (bytes hit stream); NOT replaying blindly", e)
+                        }
+                    } else {
+                        TvLogger.w(TvLogger.TAG_REMOTE, "[$sessionId] Pre-write failure for $desc; keeping command queued for retry: ${e.message}")
+                    }
+
+                    try {
+                        transport?.close()
+                    } catch (_: Exception) {}
+                    updateRemoteState(RemoteState.DISCONNECTED)
+                    _connectionState.value = ConnectionState.Reconnecting(attempt = retryCount + 1, nextDelayMs = 0L)
+                    requestReconnect(reason = "Command transmission failed ($desc): ${e.message}", immediate = true)
                     break
                 }
             }
             updateDiagnostics()
+        }
+    }
+
+    private fun describeCommand(cmd: QueuedRemoteCommand): String = when (cmd) {
+        is QueuedRemoteCommand.KeyCommand -> "${AndroidTvKeyCodes.getKeyName(cmd.keyCode)}(${cmd.direction.name})"
+        is QueuedRemoteCommand.ImeCommand -> "IME(len=${cmd.text.length})"
+        is QueuedRemoteCommand.AppLinkCommand -> "AppLink(${cmd.appLink})"
+    }
+
+    private fun recordDisconnectReason(reason: String) {
+        lastDisconnectReason = reason
+        if (recentReconnectReasons.lastOrNull() != reason) {
+            if (recentReconnectReasons.size >= MAX_REASON_HISTORY) {
+                recentReconnectReasons.removeFirst()
+            }
+            recentReconnectReasons.addLast(reason)
         }
     }
 
@@ -745,15 +848,20 @@ class TvRemoteManagerImpl(
             connectionStateName = _connectionState.value::class.simpleName ?: "Unknown",
             sessionId = activeSessionId,
             reconnectAttemptCount = retryCount,
+            coalescedReconnectCount = coalescedReconnectCount,
             lastSuccessfulConnectTimeMs = lastSuccessfulConnectTimeMs,
             lastReceivedResponseTimeMs = lastReceivedFrameTimeMs,
             lastOutboundFrameTimeMs = lastOutboundFrameTimeMs,
             lastDisconnectReason = lastDisconnectReason,
+            recentReconnectReasons = recentReconnectReasons.toList(),
             pendingCommandCount = commandQueue.size,
             isPingOutstanding = isPingOutstanding,
             lastPingSentTimeMs = lastPingSentTimeMs,
             droppedCommandCount = commandQueue.expiredCount,
-            evictedCommandCount = commandQueue.evictedCount
+            evictedCommandCount = commandQueue.evictedCount,
+            lastQueueExpirationTimeMs = commandQueue.lastExpirationTimeMs,
+            uncertainDeliveryCount = uncertainDeliveryCount,
+            lastUncertainCommand = lastUncertainCommand
         )
     }
 }

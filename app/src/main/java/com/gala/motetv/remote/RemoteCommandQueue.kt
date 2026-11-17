@@ -45,7 +45,8 @@ sealed class QueuedRemoteCommand(
  * Applies short expiration times and handles long-press repeat deduplication.
  */
 class RemoteCommandQueue(
-    private val maxCapacity: Int = MAX_QUEUE_CAPACITY
+    private val maxCapacity: Int = MAX_QUEUE_CAPACITY,
+    private val timeProvider: () -> Long = { System.currentTimeMillis() }
 ) {
     companion object {
         const val MAX_QUEUE_CAPACITY = 25
@@ -62,36 +63,45 @@ class RemoteCommandQueue(
     val expiredCount: Int
         get() = synchronized(lock) { _expiredCount }
 
+    private var _lastExpirationTimeMs = 0L
+    val lastExpirationTimeMs: Long
+        get() = synchronized(lock) { _lastExpirationTimeMs }
+
     val size: Int
         get() = synchronized(lock) {
             purgeExpiredInternal()
             queue.size
         }
 
+    fun isCommandExpired(command: QueuedRemoteCommand): Boolean {
+        return (timeProvider() - command.createdAtMs) > command.maxAgeMs
+    }
+
     /**
      * Enqueues a command. Discards expired entries and evicts the oldest entry if full.
      * Long-press START_LONG commands replace earlier unreleased START_LONG commands for the same key.
-     * END_LONG commands are always accepted to ensure releases are never lost.
+     * END_LONG commands are preserved over other commands during eviction so key releases are not lost.
      */
     fun enqueue(command: QueuedRemoteCommand): Boolean = synchronized(lock) {
         purgeExpiredInternal()
 
-        if (command is QueuedRemoteCommand.KeyCommand) {
-            when (command.direction) {
-                Direction.START_LONG -> {
-                    // Remove any older unfulfilled START_LONG for the same key
-                    queue.removeAll {
-                        it is QueuedRemoteCommand.KeyCommand &&
-                                it.keyCode == command.keyCode &&
-                                it.direction == Direction.START_LONG
-                    }
-                }
-                else -> { /* SHORT and END_LONG are enqueued directly */ }
+        if (command is QueuedRemoteCommand.KeyCommand && command.direction == Direction.START_LONG) {
+            queue.removeAll {
+                it is QueuedRemoteCommand.KeyCommand &&
+                    it.keyCode == command.keyCode &&
+                    it.direction == Direction.START_LONG
             }
         }
 
         while (queue.size >= maxCapacity) {
-            queue.removeFirstOrNull()
+            val evictIndex = queue.indexOfFirst {
+                !(it is QueuedRemoteCommand.KeyCommand && it.direction == Direction.END_LONG)
+            }
+            if (evictIndex >= 0) {
+                queue.removeAt(evictIndex)
+            } else {
+                queue.removeFirstOrNull()
+            }
             _evictedCount++
         }
         queue.addLast(command)
@@ -115,7 +125,6 @@ class RemoteCommandQueue(
             queue.removeFirst()
             return true
         }
-        // Fallback: search and remove by commandId
         val idx = queue.indexOfFirst { it.commandId == command.commandId }
         if (idx >= 0) {
             queue.removeAt(idx)
@@ -140,13 +149,14 @@ class RemoteCommandQueue(
     }
 
     private fun purgeExpiredInternal() {
-        val now = System.currentTimeMillis()
+        val now = timeProvider()
         val it = queue.iterator()
         while (it.hasNext()) {
             val cmd = it.next()
             if ((now - cmd.createdAtMs) > cmd.maxAgeMs) {
                 it.remove()
                 _expiredCount++
+                _lastExpirationTimeMs = now
             }
         }
     }

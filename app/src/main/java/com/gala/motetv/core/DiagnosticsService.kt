@@ -195,13 +195,16 @@ class DiagnosticsService(
             val timeSinceLastResponseSec = if (diag.lastReceivedResponseTimeMs > 0) {
                 (System.currentTimeMillis() - diag.lastReceivedResponseTimeMs) / 1000
             } else -1L
+            val timeSinceLastOutboundSec = if (diag.lastOutboundFrameTimeMs > 0) {
+                (System.currentTimeMillis() - diag.lastOutboundFrameTimeMs) / 1000
+            } else -1L
 
             items.add(
                 DiagnosticItem(
                     id = "engine_session",
                     name = "Active Engine Session",
                     status = if (sessionActive) DiagnosticStatus.PASSED else DiagnosticStatus.NOT_AVAILABLE,
-                    explanation = "Session ID #${diag.sessionId} | Reconnect attempts: ${diag.reconnectAttemptCount} | Last reason: ${diag.lastDisconnectReason}",
+                    explanation = "Session ID #${diag.sessionId} | Attempts: ${diag.reconnectAttemptCount} | Coalesced: ${diag.coalescedReconnectCount} | Last reason: ${diag.lastDisconnectReason}",
                     suggestedAction = if (sessionActive) "Session running" else "Will connect on demand"
                 )
             )
@@ -209,9 +212,9 @@ class DiagnosticsService(
             items.add(
                 DiagnosticItem(
                     id = "engine_health",
-                    name = "Connection Health & Ping",
+                    name = "Connection Health & Heartbeat",
                     status = if (diag.isPingOutstanding) DiagnosticStatus.NOT_AVAILABLE else DiagnosticStatus.PASSED,
-                    explanation = "Last TV response: ${if (timeSinceLastResponseSec >= 0) "${timeSinceLastResponseSec}s ago" else "None"} | Outstanding ping: ${diag.isPingOutstanding}",
+                    explanation = "Inbound RX: ${if (timeSinceLastResponseSec >= 0) "${timeSinceLastResponseSec}s ago" else "None"} | Outbound TX: ${if (timeSinceLastOutboundSec >= 0) "${timeSinceLastOutboundSec}s ago" else "None"} | Outstanding ping: ${diag.isPingOutstanding}",
                     suggestedAction = if (diag.isPingOutstanding) "Awaiting ping response from TV" else "TV heartbeats normal"
                 )
             )
@@ -220,9 +223,13 @@ class DiagnosticsService(
                 DiagnosticItem(
                     id = "command_queue",
                     name = "Remote Command Queue",
-                    status = if (diag.pendingCommandCount == 0) DiagnosticStatus.PASSED else DiagnosticStatus.NOT_AVAILABLE,
-                    explanation = "Pending commands in buffer: ${diag.pendingCommandCount} (Max: 25, Expiry: 3.5s)",
-                    suggestedAction = if (diag.pendingCommandCount > 0) "Draining buffer to TV" else "Queue idle"
+                    status = if (diag.pendingCommandCount == 0 && diag.uncertainDeliveryCount == 0) DiagnosticStatus.PASSED else DiagnosticStatus.NOT_AVAILABLE,
+                    explanation = "Pending: ${diag.pendingCommandCount}/25 | Expired: ${diag.droppedCommandCount} | Evicted: ${diag.evictedCommandCount} | Uncertain TX: ${diag.uncertainDeliveryCount}${diag.lastUncertainCommand?.let { " ($it)" } ?: ""}",
+                    suggestedAction = when {
+                        diag.uncertainDeliveryCount > 0 -> "Mid-stream writes are not blindly replayed"
+                        diag.pendingCommandCount > 0 -> "Draining buffer to TV"
+                        else -> "Queue idle"
+                    }
                 )
             )
         }
