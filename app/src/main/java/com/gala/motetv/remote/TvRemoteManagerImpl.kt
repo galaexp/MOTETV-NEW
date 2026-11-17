@@ -51,7 +51,8 @@ class TvRemoteManagerImpl(
     ),
     private val transportFactory: (String, Int, TvIdentity) -> TvTransport = { host, port, identity ->
         AndroidTvTransport(host, port, identity)
-    }
+    },
+    private val timeProvider: () -> Long = { System.currentTimeMillis() }
 ) : TvRemoteManager {
 
     companion object {
@@ -101,6 +102,7 @@ class TvRemoteManagerImpl(
 
     // Health monitoring state
     private var lastReceivedFrameTimeMs: Long = 0L
+    private var lastOutboundFrameTimeMs: Long = 0L
     private var lastPingSentTimeMs: Long = 0L
     private var isPingOutstanding: Boolean = false
     private var outstandingPingVal: Int = 0
@@ -170,7 +172,7 @@ class TvRemoteManagerImpl(
         val state = _connectionState.value
         val isHealthy = state is ConnectionState.Ready &&
                 transport?.isConnected == true &&
-                (System.currentTimeMillis() - lastReceivedFrameTimeMs) < (PING_INTERVAL_MS + PING_DEADLINE_MS)
+                (timeProvider() - lastReceivedFrameTimeMs) < (PING_INTERVAL_MS + PING_DEADLINE_MS)
 
         if (!isHealthy && state !is ConnectionState.Connecting) {
             TvLogger.i(TvLogger.TAG_REMOTE, "reconnectIfDisconnected: State is ${state::class.simpleName}, requesting reconnect to ${dev.name}")
@@ -208,7 +210,7 @@ class TvRemoteManagerImpl(
 
         val isHealthy = _connectionState.value is ConnectionState.Ready &&
                 transport?.isConnected == true &&
-                (System.currentTimeMillis() - lastReceivedFrameTimeMs) < (PING_INTERVAL_MS + PING_DEADLINE_MS)
+                (timeProvider() - lastReceivedFrameTimeMs) < (PING_INTERVAL_MS + PING_DEADLINE_MS)
 
         if (!isHealthy) {
             requestReconnect(reason = "Network restored", immediate = true)
@@ -219,7 +221,7 @@ class TvRemoteManagerImpl(
         if (intentionalDisconnect) return
         val dev = _currentDevice.value ?: return
 
-        val now = System.currentTimeMillis()
+        val now = timeProvider()
         val isHealthy = _connectionState.value is ConnectionState.Ready &&
                 transport?.isConnected == true &&
                 lastReceivedFrameTimeMs > 0L &&
@@ -362,8 +364,8 @@ class TvRemoteManagerImpl(
             updateRemoteState(RemoteState.READY)
             _connectionState.value = ConnectionState.Ready(device)
             retryCount = 0 // Reset retry count strictly on successful protocol session!
-            lastSuccessfulConnectTimeMs = System.currentTimeMillis()
-            lastReceivedFrameTimeMs = System.currentTimeMillis()
+            lastSuccessfulConnectTimeMs = timeProvider()
+            lastReceivedFrameTimeMs = timeProvider()
             isPingOutstanding = false
             updateDiagnostics()
 
@@ -393,7 +395,7 @@ class TvRemoteManagerImpl(
                 while (isActive && activeSessionId == sessionId && transport?.isConnected == true) {
                     try {
                         val frameBytes = reader.readNextFrame()
-                        lastReceivedFrameTimeMs = System.currentTimeMillis()
+                        lastReceivedFrameTimeMs = timeProvider()
                         updateDiagnostics()
 
                         val msg = RemoteMessage.ADAPTER.decode(frameBytes)
@@ -401,7 +403,7 @@ class TvRemoteManagerImpl(
                     } catch (e: SocketTimeoutException) {
                         // Harmless idle timeout while socket is waiting for TV frames
                         if (activeSessionId != sessionId) break
-                        yield()
+                        delay(200L)
                     }
                 }
             } catch (e: Exception) {
@@ -487,12 +489,15 @@ class TvRemoteManagerImpl(
                 delay(2000L)
                 if (activeSessionId != sessionId || _remoteState.value != RemoteState.READY) break
 
-                val now = System.currentTimeMillis()
+                val now = timeProvider()
 
                 if (isPingOutstanding) {
                     // Check if ping response deadline expired
                     if (now - lastPingSentTimeMs > PING_DEADLINE_MS) {
                         TvLogger.w(TvLogger.TAG_REMOTE, "[$sessionId] Health monitor: TV ping response deadline exceeded (${now - lastPingSentTimeMs}ms > ${PING_DEADLINE_MS}ms). Marking connection dead.")
+                        tearDownSessionInternal(closeTransport = true)
+                        _connectionState.value = ConnectionState.Reconnecting(attempt = retryCount + 1, nextDelayMs = 0L)
+                        updateDiagnostics()
                         requestReconnect(reason = "Ping response deadline exceeded", immediate = true)
                         break
                     }
@@ -515,6 +520,9 @@ class TvRemoteManagerImpl(
                             TvLogger.w(TvLogger.TAG_REMOTE, "[$sessionId] Health monitor: Failed to write ping: ${e.message}")
                             isPingOutstanding = false
                             outstandingPingVal = 0
+                            tearDownSessionInternal(closeTransport = true)
+                            _connectionState.value = ConnectionState.Reconnecting(attempt = retryCount + 1, nextDelayMs = 0L)
+                            updateDiagnostics()
                             requestReconnect(reason = "Failed to write ping: ${e.message}", immediate = true)
                             break
                         }
@@ -529,6 +537,7 @@ class TvRemoteManagerImpl(
             if (activeSessionId != sessionId) throw IOException("Session expired")
             val payload = message.encode()
             writer.writeFrame(payload)
+            lastOutboundFrameTimeMs = timeProvider()
         }
     }
 
@@ -539,6 +548,7 @@ class TvRemoteManagerImpl(
             val writer = trans.frameWriter ?: throw IOException("Writer unavailable")
             val payload = message.encode()
             writer.writeFrame(payload)
+            lastOutboundFrameTimeMs = timeProvider()
         }
     }
 
@@ -664,7 +674,7 @@ class TvRemoteManagerImpl(
 
                     // Successfully transmitted: remove from queue head
                     commandQueue.removeHead(cmd)
-                    lastReceivedFrameTimeMs = System.currentTimeMillis() // Outbound frame activity
+                    lastOutboundFrameTimeMs = timeProvider()
 
                     when (cmd) {
                         is QueuedRemoteCommand.KeyCommand -> {
@@ -737,6 +747,7 @@ class TvRemoteManagerImpl(
             reconnectAttemptCount = retryCount,
             lastSuccessfulConnectTimeMs = lastSuccessfulConnectTimeMs,
             lastReceivedResponseTimeMs = lastReceivedFrameTimeMs,
+            lastOutboundFrameTimeMs = lastOutboundFrameTimeMs,
             lastDisconnectReason = lastDisconnectReason,
             pendingCommandCount = commandQueue.size,
             isPingOutstanding = isPingOutstanding,

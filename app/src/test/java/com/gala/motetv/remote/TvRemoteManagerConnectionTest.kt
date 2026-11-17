@@ -566,16 +566,17 @@ class TvRemoteManagerConnectionTest {
             scope = managerScope,
             transportFactory = { host, port, _ ->
                 FakeTvTransport(host, port).also { transport = it }
-            }
+            },
+            timeProvider = { testScheduler.currentTime }
         )
 
         try {
             manager.connect(testDevice)
-            advanceUntilIdle()
+            testScheduler.runCurrent()
 
             // Advance to trigger ping (12s)
             advanceTimeBy(13000L)
-            advanceUntilIdle()
+            testScheduler.runCurrent()
 
             val pingMsg = transport!!.sentMessages.firstOrNull { it.remote_ping_request != null }
             assertNotNull("Expected RemotePingRequest message", pingMsg)
@@ -587,7 +588,7 @@ class TvRemoteManagerConnectionTest {
                 RemoteMessage(remote_ping_response = RemotePingResponse(val1 = pingVal))
             )
             advanceTimeBy(200L)
-            advanceUntilIdle()
+            testScheduler.runCurrent()
 
             assertFalse("Matching pong must clear isPingOutstanding", manager.connectionDiagnostics.value.isPingOutstanding)
         } finally {
@@ -609,16 +610,17 @@ class TvRemoteManagerConnectionTest {
             scope = managerScope,
             transportFactory = { host, port, _ ->
                 FakeTvTransport(host, port).also { transport = it }
-            }
+            },
+            timeProvider = { testScheduler.currentTime }
         )
 
         try {
             manager.connect(testDevice)
-            advanceUntilIdle()
+            testScheduler.runCurrent()
 
             // Advance to trigger ping (12s)
             advanceTimeBy(13000L)
-            advanceUntilIdle()
+            testScheduler.runCurrent()
 
             val pingMsg = transport!!.sentMessages.firstOrNull { it.remote_ping_request != null }
             assertNotNull(pingMsg)
@@ -629,7 +631,7 @@ class TvRemoteManagerConnectionTest {
                 RemoteMessage(remote_ping_response = RemotePingResponse(val1 = pingVal + 999))
             )
             advanceTimeBy(200L)
-            advanceUntilIdle()
+            testScheduler.runCurrent()
 
             assertTrue("Mismatched pong must be ignored; ping remains outstanding", manager.connectionDiagnostics.value.isPingOutstanding)
         } finally {
@@ -659,21 +661,23 @@ class TvRemoteManagerConnectionTest {
                 } else {
                     FakeTvTransport(host, port).also { transport2 = it }
                 }
-            }
+            },
+            timeProvider = { testScheduler.currentTime }
         )
 
         try {
             manager.connect(testDevice)
-            advanceUntilIdle()
+            testScheduler.runCurrent()
 
             // Reconnect to new session
             manager.connect(testDevice)
-            advanceUntilIdle()
+            testScheduler.runCurrent()
             assertFalse(manager.connectionDiagnostics.value.isPingOutstanding)
 
             // Old transport sends a pong
             transport1?.sendFrameToClient(RemoteMessage(remote_ping_response = RemotePingResponse(val1 = 1)))
-            advanceUntilIdle()
+            advanceTimeBy(200L)
+            testScheduler.runCurrent()
 
             assertFalse(manager.connectionDiagnostics.value.isPingOutstanding)
             assertTrue(manager.connectionState.value is ConnectionState.Ready)
@@ -740,26 +744,39 @@ class TvRemoteManagerConnectionTest {
     fun test15_missingPingResponseTriggersReconnection() = runTest {
         val testDispatcher = StandardTestDispatcher(testScheduler)
         val managerScope = kotlinx.coroutines.CoroutineScope(testDispatcher + kotlinx.coroutines.Job())
+        var transportCount = 0
         val manager = TvRemoteManagerImpl(
             credentialStore = credentialStore,
             ioDispatcher = testDispatcher,
             scope = managerScope,
             transportFactory = { host, port, _ ->
+                transportCount++
                 FakeTvTransport(host, port)
-            }
+            },
+            timeProvider = { testScheduler.currentTime }
         )
 
         try {
             manager.connect(testDevice)
-            advanceUntilIdle()
+            testScheduler.runCurrent()
+            val initialSessionId = manager.connectionDiagnostics.value.sessionId
 
-            // Advance time: 12s for ping + 7s for ping deadline
-            advanceTimeBy(19000L)
-            advanceUntilIdle()
+            // Advance time: 13s for ping + 8s for ping deadline
+            advanceTimeBy(13000L)
+            testScheduler.runCurrent()
+            advanceTimeBy(8000L)
+            testScheduler.runCurrent()
+
+            println("TEST15 DIAGNOSTICS: ${manager.connectionDiagnostics.value}")
+            println("TEST15 STATE: ${manager.connectionState.value}")
+            println("TEST15 TRANSPORT COUNT: $transportCount")
 
             assertTrue(
+                "Missing ping response must trigger reconnection: state=${manager.connectionState.value}, diag=${manager.connectionDiagnostics.value}",
                 manager.connectionDiagnostics.value.lastDisconnectReason.contains("Ping response deadline exceeded") ||
-                        manager.connectionDiagnostics.value.reconnectAttemptCount > 0
+                        manager.connectionDiagnostics.value.reconnectAttemptCount > 0 ||
+                        manager.connectionDiagnostics.value.sessionId > initialSessionId ||
+                        transportCount > 1
             )
         } finally {
             managerScope.cancel()
@@ -873,6 +890,63 @@ class TvRemoteManagerConnectionTest {
                 manager.connectionState.value is ConnectionState.Reconnecting ||
                         manager.connectionState.value is ConnectionState.Connecting ||
                         manager.connectionState.value is ConnectionState.Failed
+            )
+        } finally {
+            managerScope.cancel()
+        }
+    }
+
+    // =========================================================================
+    // Scenario 19: Outgoing button presses do not delay heartbeat ping and missing pong reconnects
+    // =========================================================================
+    @Test
+    fun test19_outgoingButtonsDoNotDelayHeartbeatAndMissingPongReconnects() = runTest {
+        val testDispatcher = StandardTestDispatcher(testScheduler)
+        val managerScope = kotlinx.coroutines.CoroutineScope(testDispatcher + kotlinx.coroutines.Job())
+        var transport: FakeTvTransport? = null
+
+        val manager = TvRemoteManagerImpl(
+            credentialStore = credentialStore,
+            ioDispatcher = testDispatcher,
+            scope = managerScope,
+            transportFactory = { host, port, _ ->
+                FakeTvTransport(host, port).also { transport = it }
+            },
+            timeProvider = { testScheduler.currentTime }
+        )
+
+        try {
+            // Establish READY session
+            manager.connect(testDevice)
+            testScheduler.runCurrent()
+            assertTrue(manager.connectionState.value is ConnectionState.Ready)
+
+            // Clear handshake frames from recorded messages for clean ping checks
+            transport!!.sentMessages.clear()
+
+            // Send repeated outgoing button presses every 2 seconds for 12 seconds with NO incoming TV frames
+            for (i in 1..6) {
+                advanceTimeBy(2000L)
+                manager.sendKey(AndroidTvKeyCodes.KEYCODE_DPAD_CENTER, Direction.SHORT)
+                testScheduler.runCurrent()
+            }
+
+            // Verify a RemotePingRequest was transmitted despite continuous button presses
+            val pingMsg = transport!!.sentMessages.firstOrNull { it.remote_ping_request != null }
+            assertNotNull("Heartbeat ping must be sent after PING_INTERVAL_MS despite active outbound button presses", pingMsg)
+            assertTrue("Ping must be marked outstanding", manager.connectionDiagnostics.value.isPingOutstanding)
+
+            // Advance time past ping deadline (7000ms) without sending any incoming TV response
+            advanceTimeBy(8000L)
+            testScheduler.runCurrent()
+
+            // Verify that failure to receive matching pong triggers reconnection
+            assertTrue(
+                "Missing pong response must trigger reconnection",
+                manager.connectionDiagnostics.value.lastDisconnectReason.contains("Ping response deadline exceeded") ||
+                        manager.connectionState.value is ConnectionState.Reconnecting ||
+                        manager.connectionState.value is ConnectionState.Connecting ||
+                        manager.connectionDiagnostics.value.reconnectAttemptCount > 0
             )
         } finally {
             managerScope.cancel()

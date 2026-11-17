@@ -11,6 +11,7 @@ data class ConnectionDiagnostics(
     val reconnectAttemptCount: Int = 0,
     val lastSuccessfulConnectTimeMs: Long = 0L,
     val lastReceivedResponseTimeMs: Long = 0L,
+    val lastOutboundFrameTimeMs: Long = 0L,
     val lastDisconnectReason: String = "None",
     val pendingCommandCount: Int = 0,
     val isPingOutstanding: Boolean = false,
